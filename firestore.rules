@@ -1,0 +1,233 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function verifiedColumbiaUser() {
+      return signedIn()
+        && request.auth.token.email is string
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.matches('.*@columbia\\.edu$');
+    }
+
+    function isSelf(userId) {
+      return verifiedColumbiaUser() && request.auth.uid == userId;
+    }
+
+    function pairIdFor(uidA, uidB) {
+      return uidA < uidB ? uidA + '_' + uidB : uidB + '_' + uidA;
+    }
+
+    function hasContactUnlockWith(userId) {
+      return verifiedColumbiaUser()
+        && exists(
+          /databases/$(database)/documents/contact_unlocks/$(pairIdFor(request.auth.uid, userId))
+        )
+        && (
+          get(
+            /databases/$(database)/documents/contact_unlocks/$(pairIdFor(request.auth.uid, userId))
+          ).data.userA == request.auth.uid
+          || get(
+            /databases/$(database)/documents/contact_unlocks/$(pairIdFor(request.auth.uid, userId))
+          ).data.userB == request.auth.uid
+        )
+        && (
+          get(
+            /databases/$(database)/documents/contact_unlocks/$(pairIdFor(request.auth.uid, userId))
+          ).data.userA == userId
+          || get(
+            /databases/$(database)/documents/contact_unlocks/$(pairIdFor(request.auth.uid, userId))
+          ).data.userB == userId
+        );
+    }
+
+    function validListingType(type) {
+      return type == 'lend' || type == 'borrow';
+    }
+
+    function validListingStatus(status) {
+      return status == 'active' || status == 'archived' || status == 'sold';
+    }
+
+    function validOfferStatus(status) {
+      return status == 'pending'
+        || status == 'accepted'
+        || status == 'declined';
+    }
+
+    function urgentAlertsEnabledFor(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId))
+        && get(/databases/$(database)/documents/users/$(userId))
+          .data.onboarding.urgentAlertsEnabled == true;
+    }
+
+    function validUrgentOnCreate(data, userId) {
+      return data.urgentUntil == null
+        || (
+          data.urgentUntil is timestamp
+          && data.type == 'borrow'
+          && urgentAlertsEnabledFor(userId)
+        );
+    }
+
+    function validUrgentOnUpdate(userId) {
+      // Don't block unrelated listing updates (accept/sold/archive) when urgent
+      // fields are unchanged. Only enforce toggle when setting/changing urgentUntil.
+      return request.resource.data.urgentUntil == resource.data.urgentUntil
+        || request.resource.data.urgentUntil == null
+        || (
+          request.resource.data.urgentUntil is timestamp
+          && request.resource.data.type == 'borrow'
+          && urgentAlertsEnabledFor(userId)
+        );
+    }
+
+    function isOfferOwner() {
+      return resource.data.ownerId == request.auth.uid;
+    }
+
+    // Private user profile doc. Contact info lives here, so only self can read.
+    match /users/{userId} {
+      allow create: if isSelf(userId)
+        && request.resource.data.email is string
+        && request.resource.data.email.matches('.*@columbia\\.edu$');
+
+      allow read: if isSelf(userId) || hasContactUnlockWith(userId);
+
+      allow update: if isSelf(userId)
+        && request.resource.data.email is string
+        && request.resource.data.email.matches('.*@columbia\\.edu$')
+        && request.resource.data.email == resource.data.email;
+
+      allow delete: if false;
+    }
+
+    // Public profile view used in listing details.
+    match /public_profiles/{userId} {
+      allow read: if verifiedColumbiaUser();
+      allow create, update: if isSelf(userId);
+      allow delete: if false;
+    }
+
+    // Marketplace listings are visible to verified Columbia users.
+    match /listings/{listingId} {
+      allow read: if verifiedColumbiaUser();
+
+      allow create: if verifiedColumbiaUser()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.title is string
+        && validListingType(request.resource.data.type)
+        && validListingStatus(request.resource.data.status)
+        && validUrgentOnCreate(request.resource.data, request.auth.uid);
+
+      allow update: if verifiedColumbiaUser()
+        && request.resource.data.ownerId == resource.data.ownerId
+        && resource.data.ownerId == request.auth.uid
+        && validUrgentOnUpdate(request.auth.uid);
+
+      allow delete: if false;
+    }
+
+    // Offers are only visible to the owner and requester.
+    match /offers/{offerId} {
+      allow read: if verifiedColumbiaUser()
+        && (
+          (resource != null
+            && (resource.data.ownerId == request.auth.uid
+              || resource.data.requesterId == request.auth.uid))
+          || (resource == null
+            && offerId.matches('.*_' + request.auth.uid + '$'))
+        );
+
+      allow create: if verifiedColumbiaUser()
+        && request.resource.data.requesterId == request.auth.uid
+        && request.resource.data.ownerId != request.auth.uid
+        && request.resource.data.listingId is string
+        && validOfferStatus(request.resource.data.status)
+        && request.resource.data.status == 'pending';
+
+      allow update: if verifiedColumbiaUser()
+        && (
+          (isOfferOwner()
+            && resource.data.status == 'pending'
+            && (
+              request.resource.data.status == 'accepted'
+              || request.resource.data.status == 'declined'
+            ))
+          || (
+            // Requester can retry after a decline.
+            resource.data.requesterId == request.auth.uid
+            && resource.data.status == 'declined'
+            && request.resource.data.status == 'pending'
+          )
+        )
+        && request.resource.data.listingId == resource.data.listingId
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.requesterId == resource.data.requesterId
+        && validOfferStatus(request.resource.data.status);
+
+      allow delete: if false;
+    }
+
+    // Contact unlock between two matched users. Enables private contact reveal.
+    match /contact_unlocks/{pairId} {
+      allow read: if verifiedColumbiaUser()
+        && (
+          resource.data.userA == request.auth.uid
+          || resource.data.userB == request.auth.uid
+        );
+
+      allow create, update: if verifiedColumbiaUser()
+        && request.resource.data.userA is string
+        && request.resource.data.userB is string
+        && request.resource.data.userA < request.resource.data.userB
+        && pairId == request.resource.data.userA + '_' + request.resource.data.userB
+        && request.resource.data.offerId is string
+        && request.resource.data.listingId is string
+        && existsAfter(
+          /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+        )
+        && getAfter(
+          /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+        ).data.status == 'accepted'
+        && getAfter(
+          /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+        ).data.listingId == request.resource.data.listingId
+        && request.auth.uid == getAfter(
+          /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+        ).data.ownerId
+        && (
+          (
+            request.resource.data.userA == request.auth.uid
+            && request.resource.data.userB == getAfter(
+              /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+            ).data.requesterId
+          )
+          || (
+            request.resource.data.userB == request.auth.uid
+            && request.resource.data.userA == getAfter(
+              /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+            ).data.requesterId
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // Reports are write-only from clients for now.
+    match /reports/{reportId} {
+      allow create: if verifiedColumbiaUser()
+        && request.resource.data.reporterId == request.auth.uid
+        && request.resource.data.listingId is string
+        && request.resource.data.reason is string;
+
+      allow read, update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

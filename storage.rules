@@ -1,0 +1,41 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function verifiedColumbiaUser() {
+      return signedIn()
+        && request.auth.token.email is string
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.matches('.*@columbia\\.edu$');
+    }
+
+    function isImageUpload() {
+      return request.resource != null
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size < 5 * 1024 * 1024;
+    }
+
+    // User profile media (private by default for MVP).
+    match /users/{userId}/profile/{allPaths=**} {
+      allow read: if verifiedColumbiaUser() && request.auth.uid == userId;
+      allow write: if verifiedColumbiaUser()
+        && request.auth.uid == userId
+        && (request.resource == null || isImageUpload());
+    }
+
+    // Listing images (readable by verified Columbia users).
+    match /listings/{ownerId}/{allPaths=**} {
+      allow read: if verifiedColumbiaUser();
+      allow write: if verifiedColumbiaUser()
+        && request.auth.uid == ownerId
+        && (request.resource == null || isImageUpload());
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
