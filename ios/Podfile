@@ -1,6 +1,5 @@
-platform :ios, '13.0'
+platform :ios, '15.0'
 
-# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
 
 project 'Runner', {
@@ -23,13 +22,15 @@ def flutter_root
 end
 
 require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+require 'fileutils'
 
 flutter_ios_podfile_setup
 
 target 'Runner' do
-  use_frameworks!
+  use_frameworks! :linkage => :static
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+
   target 'RunnerTests' do
     inherit! :search_paths
   end
@@ -38,5 +39,19 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+      config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+    end
+  end
+
+  pods_root = installer.sandbox.root.to_s
+  legacy_modulemap = '${PODS_ROOT}/Headers/Private/grpc/gRPC-Core.modulemap'
+  canonical_modulemap = '${PODS_ROOT}/Target Support Files/gRPC-Core/gRPC-Core.modulemap'
+
+  Dir.glob(File.join(pods_root, 'Target Support Files', '**', '*.xcconfig')).each do |xcconfig_path|
+    content = File.read(xcconfig_path)
+    next unless content.include?(legacy_modulemap)
+    File.write(xcconfig_path, content.gsub(legacy_modulemap, canonical_modulemap))
   end
 end

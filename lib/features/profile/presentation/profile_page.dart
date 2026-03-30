@@ -1,14 +1,27 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../../../core/media/image_pick_and_crop.dart';
 import '../../../models/user_transaction.dart';
 import '../../../providers/auth_controller.dart';
 import '../../../services/listing_service.dart';
+import '../../../services/onboarding_service.dart';
+import '../../../services/user_service.dart';
 import 'settings_page.dart';
 import 'transaction_history_page.dart';
 
-class ProfilePage extends StatelessWidget {
+class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
+
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  final _imagePicker = ImagePicker();
+  bool _photoUpdating = false;
 
   @override
   Widget build(BuildContext context) {
@@ -44,12 +57,10 @@ class ProfilePage extends StatelessWidget {
           padding: const EdgeInsets.all(16),
           children: [
             Center(
-              child: CircleAvatar(
-                radius: 42,
-                backgroundImage: photoUrl.isNotEmpty ? NetworkImage(photoUrl) : null,
-                child: photoUrl.isEmpty
-                    ? const Icon(Icons.person_outline, size: 34)
-                    : null,
+              child: _EditableProfileAvatar(
+                photoUrl: photoUrl,
+                onEdit: _photoUpdating ? null : () => _changeProfilePhoto(),
+                isBusy: _photoUpdating,
               ),
             ),
             const SizedBox(height: 12),
@@ -135,10 +146,141 @@ class ProfilePage extends StatelessWidget {
     );
   }
 
+  Future<void> _changeProfilePhoto() async {
+    final auth = context.read<AuthController>();
+    final user = auth.firebaseUser;
+    if (user == null) {
+      _showMessage('Please sign in again.');
+      return;
+    }
+
+    try {
+      final image = await pickAndCropImage(
+        context: context,
+        imagePicker: _imagePicker,
+        cropTitle: 'Crop profile photo',
+        circleUi: true,
+        aspectRatio: 1,
+        maxWidth: 1400,
+        imageQuality: 88,
+      );
+      if (!mounted || image == null) {
+        return;
+      }
+
+      setState(() {
+        _photoUpdating = true;
+      });
+
+      final photoUrl = await context.read<OnboardingService>().uploadProfilePhoto(
+            uid: user.uid,
+            image: image,
+          );
+      await user.updatePhotoURL(photoUrl);
+      await user.reload();
+      await context.read<UserService>().updateProfilePhoto(
+            uid: user.uid,
+            photoUrl: photoUrl,
+          );
+
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Profile picture updated.');
+    } on PlatformException {
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Photo picker is unavailable right now.');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Could not update profile picture: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _photoUpdating = false;
+        });
+      }
+    }
+  }
+
+  void _showMessage(String message) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
   String _formatDate(DateTime date) {
     final month = date.month.toString().padLeft(2, '0');
     final day = date.day.toString().padLeft(2, '0');
     return '$month/$day/${date.year}';
+  }
+}
+
+class _EditableProfileAvatar extends StatelessWidget {
+  const _EditableProfileAvatar({
+    required this.photoUrl,
+    required this.onEdit,
+    required this.isBusy,
+  });
+
+  final String photoUrl;
+  final VoidCallback? onEdit;
+  final bool isBusy;
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = Container(
+      color: Theme.of(context).colorScheme.surfaceVariant,
+      alignment: Alignment.center,
+      child: const Icon(Icons.person_outline, size: 34),
+    );
+
+    return Column(
+      children: [
+        SizedBox(
+          width: 100,
+          height: 100,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned.fill(
+                child: ClipOval(
+                  child: photoUrl.isEmpty
+                      ? fallback
+                      : Image.network(
+                          photoUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => fallback,
+                        ),
+                ),
+              ),
+              Positioned(
+                right: -2,
+                bottom: -2,
+                child: FilledButton.tonal(
+                  onPressed: onEdit,
+                  style: FilledButton.styleFrom(
+                    shape: const CircleBorder(),
+                    padding: const EdgeInsets.all(8),
+                    minimumSize: const Size(34, 34),
+                  ),
+                  child: isBusy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.camera_alt_outlined, size: 16),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 }
 

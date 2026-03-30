@@ -40,8 +40,8 @@ class PublicProfilePage extends StatelessWidget {
               final listings = listingSnapshot.data ?? const <Listing>[];
               final activeCount =
                   listings.where((listing) => listing.status == ListingStatus.active).length;
-              final soldCount =
-                  listings.where((listing) => listing.status == ListingStatus.sold).length;
+              final inUseCount =
+                  listings.where((listing) => listing.status != ListingStatus.active).length;
 
               return ListView(
                 padding: const EdgeInsets.all(20),
@@ -92,8 +92,8 @@ class PublicProfilePage extends StatelessWidget {
                       const SizedBox(width: 10),
                       Expanded(
                         child: _MiniStatCard(
-                          label: 'Sold',
-                          value: soldCount.toString(),
+                          label: 'In Use',
+                          value: inUseCount.toString(),
                         ),
                       ),
                     ],
@@ -224,8 +224,8 @@ class _PublicListingRow extends StatelessWidget {
   String _metaText(Listing listing) {
     final statusLabel = switch (listing.status) {
       ListingStatus.active => 'Active',
-      ListingStatus.archived => 'Archived',
-      ListingStatus.sold => 'Sold',
+      ListingStatus.archived => 'In Use',
+      ListingStatus.sold => 'In Use',
     };
     final posted = _timeText(listing.createdAt);
     return '$statusLabel · $posted';

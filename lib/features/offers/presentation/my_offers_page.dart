@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../../core/input_formatters/us_phone_input_formatter.dart';
 import '../../../models/app_user.dart';
 import '../../../models/listing.dart';
 import '../../../models/listing_offer.dart';
@@ -18,6 +19,9 @@ class MyOffersPage extends StatefulWidget {
 
 class _MyOffersPageState extends State<MyOffersPage> {
   final _searchController = TextEditingController();
+  final _searchFocusNode = FocusNode();
+  Stream<List<ListingOffer>>? _myOffersStream;
+  String? _streamRequesterId;
   final Set<OfferStatus> _selectedStatuses = {
     OfferStatus.pending,
     OfferStatus.accepted,
@@ -29,7 +33,65 @@ class _MyOffersPageState extends State<MyOffersPage> {
   @override
   void dispose() {
     _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
+  }
+
+  void _applySearch([String? value]) {
+    final normalized = (value ?? _searchController.text).trim().toLowerCase();
+    if (!mounted || normalized == _search) {
+      return;
+    }
+    setState(() {
+      _search = normalized;
+    });
+  }
+
+  void _applySearchLive(String value) {
+    final normalized = value.trim().toLowerCase();
+    if (!mounted || normalized == _search) {
+      return;
+    }
+
+    final keepFocus = _searchFocusNode.hasFocus;
+    setState(() {
+      _search = normalized;
+    });
+
+    if (keepFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+        if (!_searchFocusNode.hasFocus) {
+          _searchFocusNode.requestFocus();
+          _searchController.selection = TextSelection.collapsed(
+            offset: _searchController.text.length,
+          );
+        }
+      });
+    }
+  }
+
+  void _clearSearch() {
+    _searchFocusNode.unfocus();
+    FocusScope.of(context).unfocus();
+
+    if (_searchController.text.isEmpty && _search.isEmpty) {
+      return;
+    }
+    _searchController.clear();
+    setState(() {
+      _search = '';
+    });
+  }
+
+  void _ensureStream(String requesterId) {
+    if (_streamRequesterId == requesterId && _myOffersStream != null) {
+      return;
+    }
+    _streamRequesterId = requesterId;
+    _myOffersStream = context.read<ListingService>().watchMyOffers(requesterId);
   }
 
   @override
@@ -40,11 +102,10 @@ class _MyOffersPageState extends State<MyOffersPage> {
     if (requesterId == null) {
       return const Center(child: Text('Please sign in again.'));
     }
-
-    final listingService = context.read<ListingService>();
+    _ensureStream(requesterId);
 
     return StreamBuilder<List<ListingOffer>>(
-      stream: listingService.watchMyOffers(requesterId),
+      stream: _myOffersStream,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -53,34 +114,51 @@ class _MyOffersPageState extends State<MyOffersPage> {
         final offers = snapshot.data ?? const <ListingOffer>[];
         final visibleOffers = offers
             .where((offer) => _selectedStatuses.contains(offer.status))
+            .where(_matchesSearch)
             .toList();
 
-        return ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            _buildSearchAndFilterBar(),
-            const SizedBox(height: 10),
-            _buildActiveFilterChip(),
-            const SizedBox(height: 16),
-            if (offers.isEmpty)
-              const _EmptyState(
-                message: 'No offers yet. Browse listings and tap Make offer.',
-              )
-            else if (visibleOffers.isEmpty)
-              const _EmptyState(
-                message: 'No offers match this status filter.',
-              )
-            else
-              ...visibleOffers.map(
-                (offer) => _OfferRow(
-                  offer: offer,
-                  searchText: _search,
-                ),
-              ),
-          ],
+        return _buildOffersList(
+          allOffers: offers,
+          visibleOffers: visibleOffers,
         );
       },
     );
+  }
+
+  Widget _buildOffersList({
+    required List<ListingOffer> allOffers,
+    required List<ListingOffer> visibleOffers,
+  }) {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        _buildSearchAndFilterBar(),
+        const SizedBox(height: 10),
+        _buildActiveFilterChip(),
+        const SizedBox(height: 16),
+        if (allOffers.isEmpty)
+          const _EmptyState(
+            message: 'No offers yet. Browse listings and tap Make offer.',
+          )
+        else if (visibleOffers.isEmpty)
+          const _EmptyState(
+            message: 'No offers match your search/filter.',
+          )
+        else
+          ...visibleOffers.map(
+            (offer) => _OfferRow(offer: offer),
+          ),
+      ],
+    );
+  }
+
+  bool _matchesSearch(ListingOffer offer) {
+    final normalized = _search.trim().toLowerCase();
+    if (normalized.isEmpty) {
+      return true;
+    }
+    final title = offer.listingTitle.trim().toLowerCase();
+    return title.contains(normalized);
   }
 
   Widget _buildSearchAndFilterBar() {
@@ -89,27 +167,19 @@ class _MyOffersPageState extends State<MyOffersPage> {
         Expanded(
           child: TextField(
             controller: _searchController,
+            focusNode: _searchFocusNode,
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
               prefixIcon: const Icon(Icons.search),
               hintText: 'Search offer by item name',
-              suffixIcon: _search.isEmpty
-                  ? null
-                  : IconButton(
-                      onPressed: () {
-                        _searchController.clear();
-                        setState(() {
-                          _search = '';
-                        });
-                      },
-                      icon: const Icon(Icons.clear),
-                    ),
+              suffixIcon: IconButton(
+                tooltip: 'Clear',
+                onPressed: _clearSearch,
+                icon: const Icon(Icons.clear),
+              ),
             ),
-            onChanged: (value) {
-              setState(() {
-                _search = value.trim().toLowerCase();
-              });
-            },
+            onChanged: _applySearchLive,
+            onSubmitted: _applySearch,
           ),
         ),
         const SizedBox(width: 10),
@@ -223,30 +293,55 @@ class _MyOffersPageState extends State<MyOffersPage> {
 
 }
 
-class _OfferRow extends StatelessWidget {
+class _OfferRow extends StatefulWidget {
   const _OfferRow({
     required this.offer,
-    required this.searchText,
   });
 
   final ListingOffer offer;
-  final String searchText;
+
+  @override
+  State<_OfferRow> createState() => _OfferRowState();
+}
+
+class _OfferRowState extends State<_OfferRow> {
+  Stream<Listing?>? _listingStream;
+  String? _listingId;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _ensureListingStream();
+  }
+
+  @override
+  void didUpdateWidget(covariant _OfferRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.offer.listingId != widget.offer.listingId) {
+      _ensureListingStream();
+    }
+  }
+
+  void _ensureListingStream() {
+    final listingId = widget.offer.listingId;
+    if (_listingId == listingId && _listingStream != null) {
+      return;
+    }
+    _listingId = listingId;
+    _listingStream = context.read<ListingService>().watchListing(listingId);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final listingService = context.read<ListingService>();
-
     return StreamBuilder<Listing?>(
-      stream: listingService.watchListing(offer.listingId),
+      stream: _listingStream,
       builder: (context, listingSnapshot) {
         final listing = listingSnapshot.data;
         final title = listing?.title.trim().isNotEmpty == true
             ? listing!.title
-            : 'Listing unavailable';
-
-        if (searchText.isNotEmpty && !title.toLowerCase().contains(searchText)) {
-          return const SizedBox.shrink();
-        }
+            : (widget.offer.listingTitle.trim().isNotEmpty
+                ? widget.offer.listingTitle.trim()
+                : 'Listing unavailable');
 
         return Padding(
           padding: const EdgeInsets.only(bottom: 10),
@@ -255,7 +350,7 @@ class _OfferRow extends StatelessWidget {
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => ListingDetailPage(listingId: offer.listingId),
+                  builder: (_) => ListingDetailPage(listingId: widget.offer.listingId),
                 ),
               );
             },
@@ -280,7 +375,7 @@ class _OfferRow extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      _StatusChip(status: offer.status),
+                      _StatusChip(status: widget.offer.status),
                     ],
                   ),
                   const SizedBox(height: 6),
@@ -290,12 +385,12 @@ class _OfferRow extends StatelessWidget {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    _timeText(offer.createdAt),
+                    _timeText(widget.offer.createdAt),
                     style: Theme.of(context).textTheme.labelSmall,
                   ),
-                  if (offer.status == OfferStatus.accepted) ...[
+                  if (widget.offer.status == OfferStatus.accepted) ...[
                     const SizedBox(height: 10),
-                    _AcceptedContactCard(userId: offer.ownerId),
+                    _AcceptedContactCard(userId: widget.offer.ownerId),
                   ],
                 ],
               ),
@@ -357,7 +452,9 @@ class _AcceptedContactCard extends StatelessWidget {
         final name = (user?.displayName ?? '').trim().isNotEmpty
             ? user!.displayName!.trim()
             : 'Columbia Student';
-        final phone = (user?.phoneNumber ?? '').trim();
+        final phone = UsPhoneInputFormatter.formatForDisplay(
+          (user?.phoneNumber ?? '').trim(),
+        );
 
         return _ContactContainer(
           title: 'Matched contact',

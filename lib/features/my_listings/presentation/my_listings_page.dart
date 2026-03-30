@@ -4,7 +4,9 @@ import 'package:provider/provider.dart';
 import '../../../models/listing.dart';
 import '../../../providers/auth_controller.dart';
 import '../../../services/listing_service.dart';
+import '../../listings/presentation/create_listing_flow_result.dart';
 import '../../listings/presentation/create_listing_sheet.dart';
+import '../../listings/presentation/listing_detail_page.dart';
 import 'manage_listing_page.dart';
 
 class MyListingsPage extends StatefulWidget {
@@ -16,6 +18,10 @@ class MyListingsPage extends StatefulWidget {
 
 class _MyListingsPageState extends State<MyListingsPage> {
   final _searchController = TextEditingController();
+  final _searchFocusNode = FocusNode();
+  Stream<List<Listing>>? _ownerListingsStream;
+  Stream<Map<String, int>>? _offerCountsStream;
+  String? _streamsUid;
 
   final Set<ListingType> _selectedTypes = {
     ListingType.lend,
@@ -32,7 +38,69 @@ class _MyListingsPageState extends State<MyListingsPage> {
   @override
   void dispose() {
     _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
+  }
+
+  void _applySearch([String? value]) {
+    final normalized = (value ?? _searchController.text).trim().toLowerCase();
+    if (!mounted || normalized == _search) {
+      return;
+    }
+    setState(() {
+      _search = normalized;
+    });
+  }
+
+  void _applySearchLive(String value) {
+    final normalized = value.trim().toLowerCase();
+    if (!mounted || normalized == _search) {
+      return;
+    }
+
+    final keepFocus = _searchFocusNode.hasFocus;
+    setState(() {
+      _search = normalized;
+    });
+
+    if (keepFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+        if (!_searchFocusNode.hasFocus) {
+          _searchFocusNode.requestFocus();
+          _searchController.selection = TextSelection.collapsed(
+            offset: _searchController.text.length,
+          );
+        }
+      });
+    }
+  }
+
+  void _clearSearch() {
+    _searchFocusNode.unfocus();
+    FocusScope.of(context).unfocus();
+
+    if (_searchController.text.isEmpty && _search.isEmpty) {
+      return;
+    }
+    _searchController.clear();
+    setState(() {
+      _search = '';
+    });
+  }
+
+  void _ensureStreams(String uid) {
+    if (_streamsUid == uid &&
+        _ownerListingsStream != null &&
+        _offerCountsStream != null) {
+      return;
+    }
+    final listingService = context.read<ListingService>();
+    _streamsUid = uid;
+    _ownerListingsStream = listingService.watchOwnerListings(uid);
+    _offerCountsStream = listingService.watchOfferCountsForOwner(uid);
   }
 
   @override
@@ -43,9 +111,10 @@ class _MyListingsPageState extends State<MyListingsPage> {
     if (uid == null) {
       return const Center(child: Text('Please sign in again.'));
     }
+    _ensureStreams(uid);
 
     return StreamBuilder<List<Listing>>(
-      stream: context.read<ListingService>().watchOwnerListings(uid),
+      stream: _ownerListingsStream,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -55,7 +124,7 @@ class _MyListingsPageState extends State<MyListingsPage> {
         final baseFiltered = _applyFilters(listings);
 
         return StreamBuilder<Map<String, int>>(
-          stream: context.read<ListingService>().watchOfferCountsForOwner(uid),
+          stream: _offerCountsStream,
           builder: (context, offerSnapshot) {
             final offerCounts = offerSnapshot.data ?? const <String, int>{};
             final filtered = _sortByOfferPriority(baseFiltered, offerCounts);
@@ -66,8 +135,7 @@ class _MyListingsPageState extends State<MyListingsPage> {
                 children: [
                   _buildSearchAndFilterBar(),
                   const SizedBox(height: 10),
-                  _buildActiveFilterChips(),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 6),
                   if (listings.isEmpty)
                     const _EmptyState(
                       message: 'You have not posted any listings yet.',
@@ -92,8 +160,22 @@ class _MyListingsPageState extends State<MyListingsPage> {
                 ],
               ),
               floatingActionButton: FloatingActionButton.extended(
-                onPressed: () {
-                  showCreateListingSheet(context);
+                onPressed: () async {
+                  final result = await showCreateListingSheet(context);
+                  if (!context.mounted || result == null) {
+                    return;
+                  }
+                  if (result.action == CreateListingNextAction.viewListing) {
+                    final listingId = result.listingId?.trim() ?? '';
+                    if (listingId.isEmpty) {
+                      return;
+                    }
+                    await Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => ListingDetailPage(listingId: listingId),
+                      ),
+                    );
+                  }
                 },
                 icon: const Icon(Icons.add),
                 label: const Text('Post'),
@@ -109,8 +191,7 @@ class _MyListingsPageState extends State<MyListingsPage> {
     return input.where((listing) {
       final normalizedSearch = _search.trim().toLowerCase();
       final matchesSearch = normalizedSearch.isEmpty ||
-          listing.title.toLowerCase().contains(normalizedSearch) ||
-          listing.category.toLowerCase().contains(normalizedSearch);
+          listing.title.toLowerCase().contains(normalizedSearch);
 
       final matchesType = _selectedTypes.contains(listing.type);
 
@@ -148,27 +229,19 @@ class _MyListingsPageState extends State<MyListingsPage> {
         Expanded(
           child: TextField(
             controller: _searchController,
+            focusNode: _searchFocusNode,
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
               prefixIcon: const Icon(Icons.search),
               hintText: 'Search your listings',
-              suffixIcon: _search.isEmpty
-                  ? null
-                  : IconButton(
-                      onPressed: () {
-                        _searchController.clear();
-                        setState(() {
-                          _search = '';
-                        });
-                      },
-                      icon: const Icon(Icons.clear),
-                    ),
+              suffixIcon: IconButton(
+                tooltip: 'Clear',
+                onPressed: _clearSearch,
+                icon: const Icon(Icons.clear),
+              ),
             ),
-            onChanged: (value) {
-              setState(() {
-                _search = value;
-              });
-            },
+            onChanged: _applySearchLive,
+            onSubmitted: _applySearch,
           ),
         ),
         const SizedBox(width: 10),
@@ -177,33 +250,6 @@ class _MyListingsPageState extends State<MyListingsPage> {
           icon: const Icon(Icons.tune),
           label: const Text('Filter'),
         ),
-      ],
-    );
-  }
-
-  Widget _buildActiveFilterChips() {
-    final typeLabel = switch (_selectedTypes.length) {
-      2 => 'Types: Lend + Borrow',
-      1 => _selectedTypes.first == ListingType.lend
-          ? 'Types: Lend only'
-          : 'Types: Borrow only',
-      _ => 'Types: None',
-    };
-
-    final activityLabel = switch (_selectedActivity.length) {
-      2 => 'Status: Active + Inactive',
-      1 => _selectedActivity.first == _ActivityFilter.active
-          ? 'Status: Active only'
-          : 'Status: Inactive only',
-      _ => 'Status: None',
-    };
-
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        Chip(label: Text(typeLabel)),
-        Chip(label: Text(activityLabel)),
       ],
     );
   }
@@ -276,7 +322,7 @@ class _MyListingsPageState extends State<MyListingsPage> {
                       value: tempActivity.contains(_ActivityFilter.inactive),
                       onChanged: (value) =>
                           toggleActivity(_ActivityFilter.inactive, value ?? false),
-                      title: const Text('Inactive (Archived/Sold)'),
+                      title: const Text('Inactive (Archived/In Use)'),
                       controlAffinity: ListTileControlAffinity.leading,
                     ),
                     const SizedBox(height: 12),
@@ -363,7 +409,7 @@ class _MyListingsPageState extends State<MyListingsPage> {
         shouldArchive
             ? 'Listing archived.'
             : reopeningToSold
-                ? 'Listing unarchived to sold.'
+                ? 'Listing unarchived to in use.'
                 : 'Listing unarchived.',
       );
     } catch (error) {
@@ -502,7 +548,7 @@ class _ListingRow extends StatelessWidget {
                           const SizedBox(height: 4),
                           Text(
                             (listing.hasAcceptedMatch || listing.archivedFromSold)
-                                ? 'Swipe left to unarchive to sold'
+                                ? 'Swipe left to unarchive to in use'
                                 : 'Swipe left to unarchive',
                             style: Theme.of(context).textTheme.labelSmall,
                           ),
@@ -534,7 +580,7 @@ class _ListingRow extends StatelessWidget {
       case ListingStatus.archived:
         return 'Archived';
       case ListingStatus.sold:
-        return 'Sold';
+        return 'In Use';
     }
   }
 

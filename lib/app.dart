@@ -11,7 +11,9 @@ import 'firebase/firebase_initializer.dart';
 import 'providers/auth_controller.dart';
 import 'services/auth_service.dart';
 import 'services/listing_service.dart';
+import 'services/notification_service.dart';
 import 'services/onboarding_service.dart';
+import 'services/push_notification_service.dart';
 import 'services/public_profile_service.dart';
 import 'services/user_service.dart';
 
@@ -36,11 +38,17 @@ class KnocknockApp extends StatelessWidget {
         Provider<UserService>(create: (_) => UserService()),
         Provider<OnboardingService>(create: (_) => OnboardingService()),
         Provider<ListingService>(create: (_) => ListingService()),
+        Provider<NotificationService>(create: (_) => NotificationService()),
+        Provider<PushNotificationService>(
+          create: (_) => PushNotificationService(),
+          dispose: (_, service) => service.dispose(),
+        ),
         Provider<PublicProfileService>(create: (_) => PublicProfileService()),
         ChangeNotifierProvider<AuthController>(
           create: (context) => AuthController(
             authService: context.read<AuthService>(),
             userService: context.read<UserService>(),
+            pushNotificationService: context.read<PushNotificationService>(),
           ),
         ),
       ],

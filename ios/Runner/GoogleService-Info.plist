@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>CLIENT_ID</key>
-	<string>1039404800669-38phgcu6tp8ludvt9cs3d011kuk2pn2d.apps.googleusercontent.com</string>
+	<string>1039404800669-j3vv6hrpoj954rhf6qj5nr8a2uoaljr7.apps.googleusercontent.com</string>
 	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.1039404800669-38phgcu6tp8ludvt9cs3d011kuk2pn2d</string>
+	<string>com.googleusercontent.apps.1039404800669-j3vv6hrpoj954rhf6qj5nr8a2uoaljr7</string>
 	<key>API_KEY</key>
 	<string>AIzaSyC9k2JNkVPLzb6s-w-kR64Mqo7rqwNGNVI</string>
 	<key>GCM_SENDER_ID</key>
@@ -13,7 +13,7 @@
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>com.example.knocknock</string>
+	<string>com.example.theknocknock</string>
 	<key>PROJECT_ID</key>
 	<string>theknocknock-f558c</string>
 	<key>STORAGE_BUCKET</key>
@@ -29,6 +29,6 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:1039404800669:ios:fef9264c648160257a1274</string>
+	<string>1:1039404800669:ios:9436e08e5d5cfb277a1274</string>
 </dict>
 </plist>

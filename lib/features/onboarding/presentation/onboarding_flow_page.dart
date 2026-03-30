@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../../../core/media/image_pick_and_crop.dart';
+import '../../../core/input_formatters/us_phone_input_formatter.dart';
 import '../../../providers/auth_controller.dart';
 import '../../../services/onboarding_service.dart';
 import '../../../services/user_service.dart';
@@ -18,17 +20,18 @@ class OnboardingFlowPage extends StatefulWidget {
 
 class _OnboardingFlowPageState extends State<OnboardingFlowPage> {
   static const _interestOptions = <String>[
-    'Textbooks',
-    'Electronics',
     'Dorm Essentials',
-    'Kitchen',
+    'Outdoors',
     'Sports',
+    'Kitchen',
     'Clothing',
-    'Events',
-    'Furniture',
+    'Electronics',
+    'School Supplies',
+    'Other',
   ];
 
   final _phoneController = TextEditingController();
+  final _phoneFocusNode = FocusNode();
   final _imagePicker = ImagePicker();
 
   int _stepIndex = 0;
@@ -41,6 +44,7 @@ class _OnboardingFlowPageState extends State<OnboardingFlowPage> {
   @override
   void dispose() {
     _phoneController.dispose();
+    _phoneFocusNode.dispose();
     super.dispose();
   }
 
@@ -56,10 +60,9 @@ class _OnboardingFlowPageState extends State<OnboardingFlowPage> {
   }
 
   bool _validatePhone() {
-    final phone = _phoneController.text.trim();
-    final valid = RegExp(r'^\+?[0-9]{10,15}$').hasMatch(phone);
+    final valid = UsPhoneInputFormatter.isValid(_phoneController.text);
     if (!valid) {
-      _showMessage('Enter a valid phone number (digits, optional +).');
+      _showMessage('Enter a valid 10-digit phone number.');
       return false;
     }
     return true;
@@ -67,8 +70,12 @@ class _OnboardingFlowPageState extends State<OnboardingFlowPage> {
 
   Future<void> _pickImage() async {
     try {
-      final image = await _imagePicker.pickImage(
-        source: ImageSource.gallery,
+      final image = await pickAndCropImage(
+        context: context,
+        imagePicker: _imagePicker,
+        cropTitle: 'Crop profile photo',
+        circleUi: true,
+        aspectRatio: 1,
         maxWidth: 1200,
         imageQuality: 85,
       );
@@ -152,11 +159,16 @@ class _OnboardingFlowPageState extends State<OnboardingFlowPage> {
               uid: user.uid,
               image: _selectedProfileImage!,
             );
+        await user.updatePhotoURL(photoUrl);
+        await user.reload();
       }
+
+      final normalizedPhone =
+          UsPhoneInputFormatter.normalizeForStorage(_phoneController.text);
 
       await context.read<UserService>().completeOnboarding(
             uid: user.uid,
-            phoneNumber: _phoneController.text.trim(),
+            phoneNumber: normalizedPhone,
             interests: _selectedInterests.toList()..sort(),
             notificationsEnabled: _notificationsEnabled,
             urgentAlertsEnabled: _urgentAlertsEnabled,
@@ -184,17 +196,9 @@ class _OnboardingFlowPageState extends State<OnboardingFlowPage> {
 
   @override
   Widget build(BuildContext context) {
-    final auth = context.watch<AuthController>();
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Set Up Your Account'),
-        actions: [
-          TextButton(
-            onPressed: auth.isBusy || _submitting ? null : auth.signOut,
-            child: const Text('Sign out'),
-          ),
-        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -285,12 +289,29 @@ class _OnboardingFlowPageState extends State<OnboardingFlowPage> {
           'Required. We need this because this is how you will contact other users when matched.',
         ),
         const SizedBox(height: 16),
-        TextFormField(
-          controller: _phoneController,
-          keyboardType: TextInputType.phone,
-          decoration: const InputDecoration(
-            labelText: 'Phone number',
-            hintText: '+19175551234',
+        AutofillGroup(
+          child: TextFormField(
+            controller: _phoneController,
+            focusNode: _phoneFocusNode,
+            keyboardType: TextInputType.phone,
+            textInputAction: TextInputAction.done,
+            autofillHints: const [AutofillHints.telephoneNumber],
+            inputFormatters: const [UsPhoneInputFormatter()],
+            decoration: const InputDecoration(
+              labelText: 'Phone number',
+              hintText: '(917) 555-1234',
+              helperText: 'Tip: tap the number suggestion above your keyboard.',
+            ),
+            onTapOutside: (_) => FocusScope.of(context).unfocus(),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: () => _phoneFocusNode.requestFocus(),
+            icon: const Icon(Icons.auto_fix_high_outlined, size: 18),
+            label: const Text('Use iPhone autofill'),
           ),
         ),
       ],

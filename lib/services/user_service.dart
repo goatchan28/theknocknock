@@ -190,6 +190,26 @@ class UserService {
     });
   }
 
+  Future<void> updateProfilePhoto({
+    required String uid,
+    required String photoUrl,
+  }) async {
+    final normalizedUrl = photoUrl.trim();
+    if (normalizedUrl.isEmpty) {
+      return;
+    }
+
+    await userRef(uid).set({
+      'photoUrl': normalizedUrl,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await publicProfileRef(uid).set({
+      'photoUrl': normalizedUrl,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
   Future<void> _upsertPublicProfile({
     required String uid,
     required bool isNew,

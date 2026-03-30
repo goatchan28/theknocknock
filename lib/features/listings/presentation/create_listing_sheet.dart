@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 
+import 'create_listing_flow_result.dart';
 import 'listing_form_page.dart';
 
-Future<void> showCreateListingSheet(BuildContext context) {
-  return showModalBottomSheet<void>(
+Future<CreateListingFlowResult?> showCreateListingSheet(BuildContext context) {
+  return showModalBottomSheet<CreateListingFlowResult>(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,

@@ -113,7 +113,11 @@ class AuthService {
   }
 
   Future<void> signOut() async {
-    await _googleSignIn.signOut();
+    try {
+      await _googleSignIn.signOut().timeout(const Duration(seconds: 2));
+    } catch (_) {
+      // Keep going so Firebase session is always cleared.
+    }
     await _auth.signOut();
   }
 }

@@ -39,6 +39,9 @@ class ListingService {
   CollectionReference<Map<String, dynamic>> get _usersRef =>
       _firestore.collection('users');
 
+  CollectionReference<Map<String, dynamic>> get _notificationsRef =>
+      _firestore.collection('notifications');
+
   String offerDocumentId({required String listingId, required String requesterId}) {
     return '${listingId}_$requesterId';
   }
@@ -107,10 +110,47 @@ class ListingService {
         .where('requesterId', isEqualTo: requesterId)
         .limit(300)
         .snapshots()
-        .map((snapshot) {
-      final offers = snapshot.docs
+        .asyncMap((snapshot) async {
+      var offers = snapshot.docs
           .map((doc) => ListingOffer.fromFirestore(doc.id, doc.data()))
           .toList();
+
+      final missingTitleListingIds = offers
+          .where(
+            (offer) => offer.listingTitle.trim().isEmpty && offer.listingId.trim().isNotEmpty,
+          )
+          .map((offer) => offer.listingId)
+          .toSet()
+          .toList();
+
+      if (missingTitleListingIds.isNotEmpty) {
+        final listingSnapshots = await Future.wait(
+          missingTitleListingIds.map((listingId) => _listingsRef.doc(listingId).get()),
+        );
+
+        final titleByListingId = <String, String>{};
+        for (final listingSnapshot in listingSnapshots) {
+          final data = listingSnapshot.data();
+          if (data == null) {
+            continue;
+          }
+          final title = (data['title'] as String?)?.trim() ?? '';
+          if (title.isNotEmpty) {
+            titleByListingId[listingSnapshot.id] = title;
+          }
+        }
+
+        offers = offers.map((offer) {
+          if (offer.listingTitle.trim().isNotEmpty) {
+            return offer;
+          }
+          final hydratedTitle = titleByListingId[offer.listingId];
+          if (hydratedTitle == null || hydratedTitle.isEmpty) {
+            return offer;
+          }
+          return offer.copyWith(listingTitle: hydratedTitle);
+        }).toList();
+      }
 
       offers.sort((a, b) {
         final bTime = b.createdAt?.millisecondsSinceEpoch ?? 0;
@@ -424,24 +464,32 @@ class ListingService {
       return MakeOfferResult.listingUnavailable;
     }
 
-    return _firestore.runTransaction<MakeOfferResult>((transaction) async {
+    final txResult =
+        await _firestore.runTransaction<_MakeOfferTransactionResult>((transaction) async {
       final listingRef = _listingsRef.doc(listingId);
       final listingSnapshot = await transaction.get(listingRef);
 
       if (!listingSnapshot.exists || listingSnapshot.data() == null) {
-        return MakeOfferResult.listingUnavailable;
+        return const _MakeOfferTransactionResult(
+          result: MakeOfferResult.listingUnavailable,
+        );
       }
 
       final listingData = listingSnapshot.data()!;
       final status = (listingData['status'] as String?) ?? 'active';
       final ownerId = (listingData['ownerId'] as String?) ?? '';
+      final listingTitle = (listingData['title'] as String?)?.trim();
 
       if (status != 'active') {
-        return MakeOfferResult.listingUnavailable;
+        return const _MakeOfferTransactionResult(
+          result: MakeOfferResult.listingUnavailable,
+        );
       }
 
       if (ownerId == requesterId || ownerId.isEmpty) {
-        return MakeOfferResult.ownListing;
+        return const _MakeOfferTransactionResult(
+          result: MakeOfferResult.ownListing,
+        );
       }
 
       final offerRef = _offersRef.doc(
@@ -452,12 +500,15 @@ class ListingService {
       if (offerSnapshot.exists && offerSnapshot.data() != null) {
         final existingStatus = (offerSnapshot.data()!['status'] as String?) ?? '';
         if (existingStatus == 'pending' || existingStatus == 'accepted') {
-          return MakeOfferResult.alreadyPending;
+          return const _MakeOfferTransactionResult(
+            result: MakeOfferResult.alreadyPending,
+          );
         }
       }
 
       transaction.set(offerRef, {
         'listingId': listingId,
+        'listingTitle': listingTitle ?? '',
         'ownerId': ownerId,
         'requesterId': requesterId,
         'status': 'pending',
@@ -467,8 +518,29 @@ class ListingService {
         'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      return MakeOfferResult.created;
+      return _MakeOfferTransactionResult(
+        result: MakeOfferResult.created,
+        ownerId: ownerId,
+        listingTitle: listingTitle,
+      );
     });
+
+    if (txResult.result == MakeOfferResult.created &&
+        txResult.ownerId != null &&
+        txResult.ownerId!.isNotEmpty) {
+      await _writeNotification(
+        recipientId: txResult.ownerId!,
+        actorId: requesterId,
+        type: 'offer_received',
+        listingId: listingId,
+        offerId: offerDocumentId(listingId: listingId, requesterId: requesterId),
+        title: 'New offer',
+        body:
+            'Someone made an offer on ${txResult.listingTitle?.isNotEmpty == true ? txResult.listingTitle : 'your listing'}.',
+      );
+    }
+
+    return txResult.result;
   }
 
   Future<void> acceptIncomingOffer({
@@ -478,6 +550,8 @@ class ListingService {
   }) async {
     final listingRef = _listingsRef.doc(listingId);
     final acceptedOfferRef = _offersRef.doc(offerId);
+    String acceptedRequesterId = '';
+    String listingTitle = '';
 
     await _firestore.runTransaction((transaction) async {
       final listingSnapshot = await transaction.get(listingRef);
@@ -511,6 +585,8 @@ class ListingService {
       if (requesterId.isEmpty) {
         throw StateError('Offer requester is missing.');
       }
+      acceptedRequesterId = requesterId;
+      listingTitle = (listingData['title'] as String?)?.trim() ?? '';
 
       final offerStatus = (offerData['status'] as String?) ?? 'pending';
       if (offerStatus != 'pending') {
@@ -554,27 +630,59 @@ class ListingService {
         .where('ownerId', isEqualTo: ownerId)
         .get();
 
-    if (pendingOffersSnapshot.docs.isEmpty) {
-      return;
+    if (pendingOffersSnapshot.docs.isNotEmpty) {
+      final batch = _firestore.batch();
+      final declinedNotifications = <({String requesterId, String offerId})>[];
+      for (final doc in pendingOffersSnapshot.docs) {
+        final data = doc.data();
+        if ((data['status'] as String?) != 'pending') {
+          continue;
+        }
+        if (doc.id == offerId) {
+          continue;
+        }
+        final declinedRequesterId = (data['requesterId'] as String?) ?? '';
+        batch.update(doc.reference, {
+          'status': 'declined',
+          'declinedReason': 'accepted_other_offer',
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        if (declinedRequesterId.isNotEmpty) {
+          declinedNotifications.add(
+            (requesterId: declinedRequesterId, offerId: doc.id),
+          );
+        }
+      }
+
+      await batch.commit();
+
+      for (final item in declinedNotifications) {
+        await _writeNotification(
+          recipientId: item.requesterId,
+          actorId: ownerId,
+          type: 'offer_declined',
+          listingId: listingId,
+          offerId: item.offerId,
+          title: 'Offer declined',
+          body:
+              'Your offer for ${listingTitle.isEmpty ? 'a listing' : listingTitle} was declined.',
+        );
+      }
     }
 
-    final batch = _firestore.batch();
-    for (final doc in pendingOffersSnapshot.docs) {
-      final data = doc.data();
-      if ((data['status'] as String?) != 'pending') {
-        continue;
-      }
-      if (doc.id == offerId) {
-        continue;
-      }
-      batch.update(doc.reference, {
-        'status': 'declined',
-        'declinedReason': 'accepted_other_offer',
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
+    if (acceptedRequesterId.isNotEmpty) {
+      await _writeNotification(
+        recipientId: acceptedRequesterId,
+        actorId: ownerId,
+        type: 'offer_accepted',
+        listingId: listingId,
+        offerId: offerId,
+        title: 'Offer accepted',
+        body:
+            'Your offer for ${listingTitle.isEmpty ? 'a listing' : listingTitle} was accepted. Contact info is now available.',
+      );
     }
-
-    await batch.commit();
   }
 
   Future<void> declineIncomingOffer({
@@ -582,6 +690,8 @@ class ListingService {
     required String ownerId,
   }) async {
     final offerRef = _offersRef.doc(offerId);
+    String requesterId = '';
+    String listingId = '';
 
     await _firestore.runTransaction((transaction) async {
       final snapshot = await transaction.get(offerRef);
@@ -593,6 +703,8 @@ class ListingService {
       if ((data['ownerId'] as String?) != ownerId) {
         throw StateError('Only the owner can decline this offer.');
       }
+      requesterId = (data['requesterId'] as String?) ?? '';
+      listingId = (data['listingId'] as String?) ?? '';
 
       final status = (data['status'] as String?) ?? 'pending';
       if (status != 'pending') {
@@ -605,6 +717,18 @@ class ListingService {
         'updatedAt': FieldValue.serverTimestamp(),
       });
     });
+
+    if (requesterId.isNotEmpty) {
+      await _writeNotification(
+        recipientId: requesterId,
+        actorId: ownerId,
+        type: 'offer_declined',
+        listingId: listingId,
+        offerId: offerId,
+        title: 'Offer declined',
+        body: 'Your offer was declined.',
+      );
+    }
   }
 
   Future<void> submitListingReport({
@@ -641,7 +765,7 @@ class ListingService {
         'id': 'demo_${ownerId}_borrow_calculator',
         'title': 'Need TI-84 Calculator',
         'description': 'Need one for a quiz this afternoon.',
-        'category': 'Textbooks',
+        'category': 'School Supplies',
         'type': 'borrow',
         'status': 'active',
         'urgentUntil': Timestamp.fromDate(
@@ -652,7 +776,7 @@ class ListingService {
         'id': 'demo_${ownerId}_lend_foldable_table',
         'title': 'Foldable Side Table',
         'description': 'Small and easy to carry, useful for temporary setups.',
-        'category': 'Furniture',
+        'category': 'Outdoors',
         'type': 'lend',
         'status': 'active',
       },
@@ -845,4 +969,49 @@ class ListingService {
       );
     }
   }
+
+  Future<void> _writeNotification({
+    required String recipientId,
+    required String actorId,
+    required String type,
+    required String title,
+    required String body,
+    String? listingId,
+    String? offerId,
+  }) async {
+    if (recipientId.trim().isEmpty || actorId.trim().isEmpty) {
+      return;
+    }
+    if (recipientId == actorId) {
+      return;
+    }
+
+    try {
+      await _notificationsRef.add({
+        'recipientId': recipientId,
+        'actorId': actorId,
+        'type': type,
+        'title': title,
+        'body': body,
+        'listingId': listingId,
+        'offerId': offerId,
+        'createdAt': FieldValue.serverTimestamp(),
+        'readAt': null,
+      });
+    } catch (_) {
+      // Notification failures should not break core offer/listing actions.
+    }
+  }
+}
+
+class _MakeOfferTransactionResult {
+  const _MakeOfferTransactionResult({
+    required this.result,
+    this.ownerId,
+    this.listingTitle,
+  });
+
+  final MakeOfferResult result;
+  final String? ownerId;
+  final String? listingTitle;
 }

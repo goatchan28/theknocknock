@@ -216,6 +216,39 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // In-app notification feed.
+    match /notifications/{notificationId} {
+      allow read: if verifiedColumbiaUser()
+        && resource.data.recipientId == request.auth.uid;
+
+      allow create: if verifiedColumbiaUser()
+        && request.resource.data.recipientId is string
+        && request.resource.data.actorId is string
+        && request.resource.data.actorId == request.auth.uid
+        && request.resource.data.recipientId != request.auth.uid
+        && request.resource.data.type in [
+          'offer_received',
+          'offer_accepted',
+          'offer_declined'
+        ]
+        && request.resource.data.title is string
+        && request.resource.data.body is string;
+
+      allow update: if verifiedColumbiaUser()
+        && resource.data.recipientId == request.auth.uid
+        && request.resource.data.recipientId == resource.data.recipientId
+        && request.resource.data.actorId == resource.data.actorId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.body == resource.data.body
+        && request.resource.data.listingId == resource.data.listingId
+        && request.resource.data.offerId == resource.data.offerId
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.readAt is timestamp;
+
+      allow delete: if false;
+    }
+
     // Reports are write-only from clients for now.
     match /reports/{reportId} {
       allow create: if verifiedColumbiaUser()

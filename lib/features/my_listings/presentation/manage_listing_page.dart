@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../../core/input_formatters/us_phone_input_formatter.dart';
 import '../../../models/app_user.dart';
 import '../../../models/listing.dart';
 import '../../../models/listing_offer.dart';
@@ -140,10 +141,10 @@ class _ManageBodyState extends State<_ManageBody> {
           label: Text(
             listing.status == ListingStatus.archived
                 ? (listing.hasAcceptedMatch || listing.archivedFromSold
-                    ? 'Unarchive to sold'
+                    ? 'Unarchive to in use'
                     : 'Unarchive listing')
                 : listing.status == ListingStatus.sold
-                    ? 'Archive sold listing'
+                    ? 'Archive in-use listing'
                     : 'Archive listing',
           ),
         ),
@@ -238,7 +239,7 @@ class _ManageBodyState extends State<_ManageBody> {
       if (!mounted) {
         return;
       }
-      _showMessage('Offer accepted. Listing marked as sold.');
+      _showMessage('Offer accepted. Listing marked as in use.');
     } catch (error) {
       if (!mounted) {
         return;
@@ -369,7 +370,7 @@ class _ManageBodyState extends State<_ManageBody> {
         shouldArchive
             ? 'Listing archived.'
             : reopeningToSold
-                ? 'Listing unarchived to sold.'
+                ? 'Listing unarchived to in use.'
                 : 'Listing unarchived.',
       );
     } catch (error) {
@@ -407,7 +408,7 @@ class _ManageBodyState extends State<_ManageBody> {
       case ListingStatus.archived:
         return 'Archived';
       case ListingStatus.sold:
-        return 'Sold';
+        return 'In Use';
     }
   }
 }
@@ -594,7 +595,9 @@ class _AcceptedContactCard extends StatelessWidget {
         final name = (user?.displayName ?? '').trim().isNotEmpty
             ? user!.displayName!.trim()
             : 'Columbia Student';
-        final phone = (user?.phoneNumber ?? '').trim();
+        final phone = UsPhoneInputFormatter.formatForDisplay(
+          (user?.phoneNumber ?? '').trim(),
+        );
 
         return _ContactContainer(
           title: 'Matched contact',

@@ -5,9 +5,11 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../../../core/media/image_pick_and_crop.dart';
 import '../../../models/listing.dart';
 import '../../../providers/auth_controller.dart';
 import '../../../services/listing_service.dart';
+import 'create_listing_flow_result.dart';
 import 'listing_detail_page.dart';
 
 class ListingFormPage extends StatefulWidget {
@@ -35,14 +37,13 @@ class ListingFormPage extends StatefulWidget {
 
 class _ListingFormPageState extends State<ListingFormPage> {
   static const _categories = <String>[
-    'Textbooks',
-    'Electronics',
     'Dorm Essentials',
-    'Kitchen',
+    'Outdoors',
     'Sports',
+    'Kitchen',
     'Clothing',
-    'Events',
-    'Furniture',
+    'Electronics',
+    'School Supplies',
     'Other',
   ];
 
@@ -96,8 +97,12 @@ class _ListingFormPageState extends State<ListingFormPage> {
 
   Future<void> _pickImage() async {
     try {
-      final image = await _imagePicker.pickImage(
-        source: ImageSource.gallery,
+      final image = await pickAndCropImage(
+        context: context,
+        imagePicker: _imagePicker,
+        cropTitle: 'Crop listing photo',
+        circleUi: false,
+        aspectRatio: 1,
         maxWidth: 1400,
         imageQuality: 85,
       );
@@ -141,6 +146,8 @@ class _ListingFormPageState extends State<ListingFormPage> {
     if (_saving) {
       return;
     }
+
+    FocusScope.of(context).unfocus();
 
     final title = _titleController.text.trim();
     if (title.isEmpty) {
@@ -217,21 +224,36 @@ class _ListingFormPageState extends State<ListingFormPage> {
         return;
       }
 
-      await Navigator.of(context).push(
+      final shouldViewListing =
+          await Navigator.of(context).push<bool>(
         MaterialPageRoute(
           builder: (_) => ListingPostedPage(
             listingId: listingId,
             listingTitle: title,
           ),
         ),
-      );
+      ) ??
+          false;
 
       if (!mounted) {
         return;
       }
 
       if (widget.embedded) {
-        Navigator.of(context).pop(true);
+        Navigator.of(context).pop(
+          shouldViewListing
+              ? CreateListingFlowResult.viewListing(listingId)
+              : const CreateListingFlowResult.done(),
+        );
+        return;
+      }
+
+      if (shouldViewListing) {
+        await Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => ListingDetailPage(listingId: listingId),
+          ),
+        );
         return;
       }
 
@@ -274,9 +296,11 @@ class _ListingFormPageState extends State<ListingFormPage> {
     final listing = widget.listing;
     final urgentAlertsEnabled =
         context.watch<AuthController>().profile?.urgentAlertsEnabled ?? false;
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
     final content = ListView(
-      padding: const EdgeInsets.all(16),
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      padding: EdgeInsets.fromLTRB(16, 16, 16, 24 + bottomInset),
       children: [
           if (widget.embedded && !widget.isEdit && widget.showEmbeddedHeader) ...[
             Text(
@@ -301,6 +325,7 @@ class _ListingFormPageState extends State<ListingFormPage> {
               labelText: 'Item name *',
               hintText: 'What are you lending or borrowing?',
             ),
+            onTapOutside: (_) => FocusScope.of(context).unfocus(),
           ),
           const SizedBox(height: 14),
           TextField(
@@ -308,10 +333,12 @@ class _ListingFormPageState extends State<ListingFormPage> {
             enabled: !_saving,
             minLines: 3,
             maxLines: 5,
+            textInputAction: TextInputAction.done,
             decoration: const InputDecoration(
               labelText: 'Description (optional)',
               hintText: 'Add useful details for other students.',
             ),
+            onTapOutside: (_) => FocusScope.of(context).unfocus(),
           ),
           const SizedBox(height: 14),
           DropdownButtonFormField<String>(
@@ -474,18 +501,14 @@ class ListingPostedPage extends StatelessWidget {
               const SizedBox(height: 24),
               FilledButton.icon(
                 onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => ListingDetailPage(listingId: listingId),
-                    ),
-                  );
+                  Navigator.of(context).pop(true);
                 },
                 icon: const Icon(Icons.visibility_outlined),
                 label: const Text('View listing'),
               ),
               const SizedBox(height: 10),
               OutlinedButton(
-                onPressed: () => Navigator.of(context).pop(),
+                onPressed: () => Navigator.of(context).pop(false),
                 child: const Text('Done'),
               ),
             ],
@@ -543,7 +566,7 @@ class _ListingPhotoPicker extends StatelessWidget {
         const SizedBox(height: 12),
         FilledButton.tonalIcon(
           onPressed: onPick,
-          icon: const Icon(Icons.photo_library_outlined),
+          icon: const Icon(Icons.add_a_photo_outlined),
           label: Text(selectedFile == null && (imageUrl == null || imageUrl!.isEmpty)
               ? 'Add photo'
               : 'Replace photo'),

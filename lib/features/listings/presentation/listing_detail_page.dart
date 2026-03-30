@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../../core/input_formatters/us_phone_input_formatter.dart';
 import '../../../models/app_user.dart';
 import '../../../models/listing.dart';
 import '../../../models/listing_offer.dart';
@@ -246,7 +247,7 @@ class _ListingBody extends StatelessWidget {
       case ListingStatus.archived:
         return 'Archived';
       case ListingStatus.sold:
-        return 'Sold';
+        return 'In Use';
     }
   }
 
@@ -501,7 +502,9 @@ class _AcceptedContactCard extends StatelessWidget {
         final name = (user?.displayName ?? '').trim().isNotEmpty
             ? user!.displayName!.trim()
             : 'Columbia Student';
-        final phone = (user?.phoneNumber ?? '').trim();
+        final phone = UsPhoneInputFormatter.formatForDisplay(
+          (user?.phoneNumber ?? '').trim(),
+        );
 
         return _ContactContainer(
           title: 'Matched contact',
@@ -561,7 +564,7 @@ class _UnavailableCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final label = status == ListingStatus.sold
-        ? 'This listing has been marked as sold.'
+        ? 'This listing is currently in use.'
         : 'This listing is currently unavailable.';
 
     return Container(

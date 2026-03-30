@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../../models/listing.dart';
-import '../../../providers/auth_controller.dart';
 import '../../../services/listing_service.dart';
 import '../../listings/presentation/listing_detail_page.dart';
 
@@ -15,36 +14,32 @@ class HomeFeedPage extends StatefulWidget {
 
 class _HomeFeedPageState extends State<HomeFeedPage> {
   static const _categorySuggestions = <String>[
-    'Textbooks',
-    'Electronics',
     'Dorm Essentials',
-    'Kitchen',
+    'Outdoors',
     'Sports',
+    'Kitchen',
     'Clothing',
-    'Events',
-    'Furniture',
+    'Electronics',
+    'School Supplies',
+    'Other',
   ];
 
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
+  Stream<List<Listing>>? _activeListingsStream;
 
   final Set<ListingType> _selectedTypes = {
     ListingType.lend,
     ListingType.borrow,
   };
   final Set<String> _selectedCategories = <String>{};
-
   String _search = '';
-  bool _isSeedingDemo = false;
 
   @override
-  void initState() {
-    super.initState();
-    _searchFocusNode.addListener(() {
-      if (mounted) {
-        setState(() {});
-      }
-    });
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _activeListingsStream ??=
+        context.read<ListingService>().watchActiveListings();
   }
 
   @override
@@ -54,13 +49,59 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
     super.dispose();
   }
 
+  void _applySearch([String? value]) {
+    final normalized = (value ?? _searchController.text).trim().toLowerCase();
+    if (!mounted || normalized == _search) {
+      return;
+    }
+    setState(() {
+      _search = normalized;
+    });
+  }
+
+  void _applySearchLive(String value) {
+    final normalized = value.trim().toLowerCase();
+    if (!mounted || normalized == _search) {
+      return;
+    }
+
+    final keepFocus = _searchFocusNode.hasFocus;
+    setState(() {
+      _search = normalized;
+    });
+
+    if (keepFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+        if (!_searchFocusNode.hasFocus) {
+          _searchFocusNode.requestFocus();
+          _searchController.selection = TextSelection.collapsed(
+            offset: _searchController.text.length,
+          );
+        }
+      });
+    }
+  }
+
+  void _clearSearch() {
+    _searchFocusNode.unfocus();
+    FocusScope.of(context).unfocus();
+
+    if (_searchController.text.isEmpty && _search.isEmpty) {
+      return;
+    }
+    _searchController.clear();
+    setState(() {
+      _search = '';
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    final listingService = context.read<ListingService>();
-    final auth = context.watch<AuthController>();
-
     return StreamBuilder<List<Listing>>(
-      stream: listingService.watchActiveListings(),
+      stream: _activeListingsStream,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -79,16 +120,9 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
           padding: const EdgeInsets.all(16),
           children: [
             _buildSearchAndFilterBar(categories),
-            const SizedBox(height: 10),
-            if (_searchFocusNode.hasFocus) _buildSearchCategorySuggestions(),
-            if (_searchFocusNode.hasFocus) const SizedBox(height: 12),
-            _buildActiveFilterChips(),
             const SizedBox(height: 16),
             if (listings.isEmpty)
-              _EmptyFeedCard(
-                isSeeding: _isSeedingDemo,
-                onSeedPressed: () => _seedDemoListings(auth),
-              )
+              const _EmptyFeedCard()
             else ...[
               if (_selectedTypes.contains(ListingType.borrow))
                 _BorrowSection(
@@ -118,8 +152,7 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
     return input.where((listing) {
       final normalizedSearch = _search.trim().toLowerCase();
       final matchesSearch = normalizedSearch.isEmpty ||
-          listing.title.toLowerCase().contains(normalizedSearch) ||
-          listing.category.toLowerCase().contains(normalizedSearch);
+          listing.title.toLowerCase().contains(normalizedSearch);
 
       final matchesType = _selectedTypes.contains(listing.type);
 
@@ -151,23 +184,14 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
             decoration: InputDecoration(
               prefixIcon: const Icon(Icons.search),
               hintText: 'Search items',
-              suffixIcon: _search.isEmpty
-                  ? null
-                  : IconButton(
-                      onPressed: () {
-                        _searchController.clear();
-                        setState(() {
-                          _search = '';
-                        });
-                      },
-                      icon: const Icon(Icons.clear),
-                    ),
+              suffixIcon: IconButton(
+                tooltip: 'Clear',
+                onPressed: _clearSearch,
+                icon: const Icon(Icons.clear),
+              ),
             ),
-            onChanged: (value) {
-              setState(() {
-                _search = value;
-              });
-            },
+            onChanged: _applySearchLive,
+            onSubmitted: _applySearch,
           ),
         ),
         const SizedBox(width: 10),
@@ -200,29 +224,6 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
           },
         );
       }).toList(),
-    );
-  }
-
-  Widget _buildActiveFilterChips() {
-    final typeLabel = switch (_selectedTypes.length) {
-      2 => 'Types: Lend + Borrow',
-      1 => _selectedTypes.first == ListingType.lend
-          ? 'Types: Lend only'
-          : 'Types: Borrow only',
-      _ => 'Types: None',
-    };
-
-    final categoryLabel = _selectedCategories.isEmpty
-        ? 'Categories: All'
-        : 'Categories: ${_selectedCategories.join(', ')}';
-
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        Chip(label: Text(typeLabel)),
-        Chip(label: Text(categoryLabel)),
-      ],
     );
   }
 
@@ -362,56 +363,6 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
     });
   }
 
-  Future<void> _seedDemoListings(AuthController auth) async {
-    if (_isSeedingDemo) {
-      return;
-    }
-
-    final uid = auth.firebaseUser?.uid;
-    if (uid == null) {
-      _showMessage('Please sign in again.');
-      return;
-    }
-
-    setState(() {
-      _isSeedingDemo = true;
-    });
-
-    try {
-      await context.read<ListingService>().seedDemoListings(
-            ownerId: uid,
-            ownerDisplayName:
-                auth.profile?.displayName?.trim().isNotEmpty == true
-                    ? auth.profile!.displayName!
-                    : 'Columbia Student',
-            ownerPhotoUrl: auth.profile?.photoUrl,
-          );
-
-      if (!mounted) {
-        return;
-      }
-
-      _showMessage('Demo listings added.');
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-
-      _showMessage('Could not add demo listings: $error');
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isSeedingDemo = false;
-        });
-      }
-    }
-  }
-
-  void _showMessage(String message) {
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.clearSnackBars();
-    messenger.showSnackBar(SnackBar(content: Text(message)));
-  }
 }
 
 class _BorrowSection extends StatelessWidget {
@@ -701,13 +652,7 @@ class _FeedFilterResult {
 }
 
 class _EmptyFeedCard extends StatelessWidget {
-  const _EmptyFeedCard({
-    required this.onSeedPressed,
-    required this.isSeeding,
-  });
-
-  final VoidCallback onSeedPressed;
-  final bool isSeeding;
+  const _EmptyFeedCard();
 
   @override
   Widget build(BuildContext context) {
@@ -727,19 +672,7 @@ class _EmptyFeedCard extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           const Text(
-            'Add demo listings to verify feed UI right now. This is for development/demo convenience.',
-          ),
-          const SizedBox(height: 12),
-          FilledButton.tonalIcon(
-            onPressed: isSeeding ? null : onSeedPressed,
-            icon: const Icon(Icons.auto_awesome),
-            label: isSeeding
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Text('Add demo listings'),
+            'No listings yet. Be the first to post one.',
           ),
         ],
       ),

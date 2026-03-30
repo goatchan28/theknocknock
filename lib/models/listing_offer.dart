@@ -6,6 +6,7 @@ class ListingOffer {
   const ListingOffer({
     required this.id,
     required this.listingId,
+    required this.listingTitle,
     required this.ownerId,
     required this.requesterId,
     required this.status,
@@ -15,6 +16,7 @@ class ListingOffer {
 
   final String id;
   final String listingId;
+  final String listingTitle;
   final String ownerId;
   final String requesterId;
   final OfferStatus status;
@@ -48,11 +50,29 @@ class ListingOffer {
     return ListingOffer(
       id: id,
       listingId: (data['listingId'] as String?) ?? '',
+      listingTitle:
+          ((data['listingTitle'] as String?) ?? (data['listingTitleSnapshot'] as String?) ?? '')
+              .trim(),
       ownerId: (data['ownerId'] as String?) ?? '',
       requesterId: (data['requesterId'] as String?) ?? '',
       status: _statusFromString((data['status'] as String?) ?? 'pending'),
       createdAt: _toDateTime(data['createdAt']),
       updatedAt: _toDateTime(data['updatedAt']),
+    );
+  }
+
+  ListingOffer copyWith({
+    String? listingTitle,
+  }) {
+    return ListingOffer(
+      id: id,
+      listingId: listingId,
+      listingTitle: listingTitle ?? this.listingTitle,
+      ownerId: ownerId,
+      requesterId: requesterId,
+      status: status,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
     );
   }
 }
