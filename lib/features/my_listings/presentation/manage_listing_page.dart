@@ -12,6 +12,8 @@ import '../../../services/public_profile_service.dart';
 import '../../../services/user_service.dart';
 import '../../listings/presentation/listing_detail_page.dart';
 import '../../listings/presentation/listing_form_page.dart';
+import '../../listings/presentation/create_listing_sheet.dart';
+import '../../listings/presentation/create_listing_flow_result.dart';
 import '../../profile/presentation/public_profile_page.dart';
 
 class ManageListingPage extends StatelessWidget {
@@ -60,6 +62,22 @@ class _ManageBodyState extends State<_ManageBody> {
   @override
   Widget build(BuildContext context) {
     final listing = widget.listing;
+    final statusTone = _statusTone(context, listing.status);
+    final urgentTone = _urgentTone(context);
+    final isMatchedOrInUse =
+        listing.status == ListingStatus.sold ||
+        listing.hasAcceptedMatch ||
+        listing.archivedFromSold;
+    final isReturnedLocked = listing.returnedFromMatch;
+    final isInUseNow =
+        listing.status == ListingStatus.sold && listing.pickedUpAt != null;
+    final isArchiveAction = listing.status != ListingStatus.archived;
+    final archiveDisabledForInUse = isArchiveAction && isInUseNow;
+    final showUrgentTimerExpiredHint =
+        listing.isBorrow &&
+        listing.status == ListingStatus.active &&
+        listing.isUrgent &&
+        !listing.hasUrgentTimer;
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -107,7 +125,33 @@ class _ManageBodyState extends State<_ManageBody> {
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                       const SizedBox(height: 6),
-                      Chip(label: Text(_statusLabel(listing.status))),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          if (listing.isBorrow &&
+                              listing.status == ListingStatus.active &&
+                              listing.isUrgent)
+                            Chip(
+                              label: Text(_urgentLabel(listing)),
+                              backgroundColor: urgentTone.background,
+                              side: BorderSide(color: urgentTone.border),
+                              labelStyle: TextStyle(
+                                color: urgentTone.foreground,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          Chip(
+                            label: Text(_statusLabel(listing)),
+                            backgroundColor: statusTone.background,
+                            side: BorderSide(color: statusTone.border),
+                            labelStyle: TextStyle(
+                              color: statusTone.foreground,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
                     ],
                   ),
                 ),
@@ -118,7 +162,7 @@ class _ManageBodyState extends State<_ManageBody> {
         ),
         const SizedBox(height: 18),
         FilledButton.tonalIcon(
-          onPressed: _busy
+          onPressed: _busy || isMatchedOrInUse || isReturnedLocked
               ? null
               : () async {
                   await Navigator.of(context).push(
@@ -130,24 +174,59 @@ class _ManageBodyState extends State<_ManageBody> {
           icon: const Icon(Icons.edit_outlined),
           label: const Text('Edit listing'),
         ),
+        if (isMatchedOrInUse) ...[
+          const SizedBox(height: 6),
+          Text(
+            'Editing is disabled while this item is matched or in use.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ] else if (isReturnedLocked) ...[
+          const SizedBox(height: 6),
+          Text(
+            'Returned listings cannot be edited. Relist instead.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+        if (showUrgentTimerExpiredHint) ...[
+          const SizedBox(height: 6),
+          Text(
+            'Urgent timer expired. You can edit listing and save changes to reset the timer.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
         const SizedBox(height: 10),
         FilledButton.tonalIcon(
-          onPressed: _busy ? null : () => _toggleArchive(listing),
+          onPressed: _busy || archiveDisabledForInUse
+              ? null
+              : listing.returnedFromMatch
+              ? () => _promptRelistFlow(sourceListing: listing)
+              : () => _toggleArchive(listing),
           icon: Icon(
-            listing.status == ListingStatus.archived
+            listing.returnedFromMatch
+                ? Icons.refresh_outlined
+                : listing.status == ListingStatus.archived
                 ? Icons.unarchive_outlined
                 : Icons.archive_outlined,
           ),
           label: Text(
-            listing.status == ListingStatus.archived
-                ? (listing.hasAcceptedMatch || listing.archivedFromSold
-                    ? 'Unarchive to in use'
-                    : 'Unarchive listing')
+            listing.returnedFromMatch
+                ? 'Relist listing'
+                : listing.status == ListingStatus.archived
+                ? 'Unarchive listing'
                 : listing.status == ListingStatus.sold
-                    ? 'Archive in-use listing'
+                    ? (listing.pickedUpAt == null
+                        ? 'Archive matched listing'
+                        : 'Archive in-use listing')
                     : 'Archive listing',
           ),
         ),
+        if (archiveDisabledForInUse) ...[
+          const SizedBox(height: 6),
+          Text(
+            'In-use listings cannot be archived.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
         const SizedBox(height: 20),
         StreamBuilder<List<ListingOffer>>(
           stream: context.read<ListingService>().watchIncomingOffersForListing(
@@ -191,10 +270,15 @@ class _ManageBodyState extends State<_ManageBody> {
                         (offer) => Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: _IncomingOfferTile(
+                            listing: listing,
                             offer: offer,
                             busy: _busy,
                             onAccept: () => _acceptOffer(offer),
                             onDecline: () => _declineOffer(offer),
+                            onMarkPickedUp: () =>
+                                _markAcceptedOfferPickedUp(listing: listing, offer: offer),
+                            onMarkReturned: () =>
+                                _markAcceptedOfferReturned(listing: listing, offer: offer),
                             onOpenRequesterProfile: () =>
                                 _openRequesterProfile(offer.requesterId),
                           ),
@@ -239,12 +323,20 @@ class _ManageBodyState extends State<_ManageBody> {
       if (!mounted) {
         return;
       }
-      _showMessage('Offer accepted. Listing marked as in use.');
+      _showMessage('Offer accepted. Listing is now matched.');
     } catch (error) {
       if (!mounted) {
         return;
       }
-      _showMessage('Could not accept offer: $error');
+      final recovered = await _didAcceptSucceedDespiteError(offer.id);
+      if (!mounted) {
+        return;
+      }
+      if (recovered) {
+        _showMessage('Offer accepted. Listing is now matched.');
+      } else {
+        _showMessage('Could not accept offer: $error');
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -290,6 +382,130 @@ class _ManageBodyState extends State<_ManageBody> {
         });
       }
     }
+  }
+
+  Future<void> _markAcceptedOfferPickedUp({
+    required Listing listing,
+    required ListingOffer offer,
+  }) async {
+    final uid = context.read<AuthController>().firebaseUser?.uid;
+    if (uid == null) {
+      _showMessage('Session expired. Please sign in again.');
+      return;
+    }
+
+    final selectedDate = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now().add(const Duration(days: 7)),
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+      helpText: 'When should this item be returned?',
+    );
+
+    if (selectedDate == null || !mounted) {
+      return;
+    }
+
+    final dueAt = DateTime(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day,
+      23,
+      59,
+    );
+
+    setState(() {
+      _busy = true;
+    });
+    try {
+      await context.read<ListingService>().markOfferPickedUp(
+            offerId: offer.id,
+            actorId: uid,
+            returnDueAt: dueAt,
+          );
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Marked as picked up.');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Could not mark picked up: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _markAcceptedOfferReturned({
+    required Listing listing,
+    required ListingOffer offer,
+  }) async {
+    final uid = context.read<AuthController>().firebaseUser?.uid;
+    if (uid == null) {
+      _showMessage('Session expired. Please sign in again.');
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Mark item as returned?'),
+        content: const Text(
+          'This closes the active match for this listing.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Mark returned'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _busy = true;
+    });
+    try {
+      await context.read<ListingService>().markOfferReturned(
+            offerId: offer.id,
+            actorId: uid,
+          );
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Marked as returned.');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Could not mark returned: $error');
+      return;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
+    }
+
+    if (!listing.isLend) {
+      return;
+    }
+
+    await _promptRelistFlow(sourceListing: listing);
   }
 
   Future<bool?> _showOwnerLiabilityDialog() {
@@ -352,9 +568,6 @@ class _ManageBodyState extends State<_ManageBody> {
       _busy = true;
     });
 
-    final reopeningToSold =
-        listing.status == ListingStatus.archived &&
-            (listing.hasAcceptedMatch || listing.archivedFromSold);
     final shouldArchive = listing.status != ListingStatus.archived;
 
     try {
@@ -369,9 +582,7 @@ class _ManageBodyState extends State<_ManageBody> {
       _showMessage(
         shouldArchive
             ? 'Listing archived.'
-            : reopeningToSold
-                ? 'Listing unarchived to in use.'
-                : 'Listing unarchived.',
+            : 'Listing unarchived and relisted as active.',
       );
     } catch (error) {
       if (!mounted) {
@@ -385,6 +596,150 @@ class _ManageBodyState extends State<_ManageBody> {
         });
       }
     }
+  }
+
+  Future<bool> _didAcceptSucceedDespiteError(String offerId) async {
+    try {
+      final service = context.read<ListingService>();
+      final offer = await service.getOfferById(offerId);
+      if (offer?.status == OfferStatus.accepted) {
+        return true;
+      }
+
+      final listing = await service.getListingById(widget.listing.id);
+      return listing != null &&
+          listing.status == ListingStatus.sold &&
+          listing.acceptedOfferId == offerId;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _relistNow({required Listing sourceListing}) async {
+    final uid = context.read<AuthController>().firebaseUser?.uid;
+    if (uid == null) {
+      _showMessage('Session expired. Please sign in again.');
+      return;
+    }
+
+    setState(() {
+      _busy = true;
+    });
+
+    try {
+      final newListingId = await context.read<ListingService>().relistFromListing(
+            sourceListingId: sourceListing.id,
+            ownerId: uid,
+          );
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Relisted successfully.');
+      await Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => ManageListingPage(listingId: newListingId),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Could not relist: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _promptRelistFlow({required Listing sourceListing}) async {
+    final relistAction = await _showRelistSheet();
+    if (!mounted || relistAction == null) {
+      return;
+    }
+
+    switch (relistAction) {
+      case _RelistAction.now:
+        await _relistNow(sourceListing: sourceListing);
+        return;
+      case _RelistAction.withEdits:
+        await _openRelistWithEdits(sourceListing: sourceListing);
+        return;
+    }
+  }
+
+  Future<void> _openRelistWithEdits({required Listing sourceListing}) async {
+    final result = await showCreateListingSheet(
+      context,
+      prefillListing: sourceListing,
+      title: 'Relist Listing',
+    );
+
+    if (!mounted || result == null) {
+      return;
+    }
+
+    if (result.action == CreateListingNextAction.done) {
+      _showMessage('Relisted successfully.');
+      return;
+    }
+
+    final listingId = result.listingId?.trim() ?? '';
+    if (listingId.isEmpty) {
+      return;
+    }
+
+    await Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => ManageListingPage(listingId: listingId),
+      ),
+    );
+  }
+
+  Future<_RelistAction?> _showRelistSheet() {
+    return showModalBottomSheet<_RelistAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Item returned',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 6),
+                const Text('Do you want to relist this item now?'),
+                const SizedBox(height: 14),
+                FilledButton.icon(
+                  onPressed: () => Navigator.of(context).pop(_RelistAction.now),
+                  icon: const Icon(Icons.refresh_outlined),
+                  label: const Text('Relist now'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: () =>
+                      Navigator.of(context).pop(_RelistAction.withEdits),
+                  icon: const Icon(Icons.edit_outlined),
+                  label: const Text('Relist with edits'),
+                ),
+                const SizedBox(height: 6),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Not now'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   void _showMessage(String message) {
@@ -401,31 +756,105 @@ class _ManageBodyState extends State<_ManageBody> {
     );
   }
 
-  String _statusLabel(ListingStatus status) {
-    switch (status) {
+  String _statusLabel(Listing listing) {
+    if (listing.returnedFromMatch) {
+      return 'Returned';
+    }
+    switch (listing.status) {
       case ListingStatus.active:
         return 'Active';
       case ListingStatus.archived:
         return 'Archived';
       case ListingStatus.sold:
-        return 'In Use';
+        return listing.pickedUpAt == null ? 'Matched' : 'In Use';
     }
   }
+
+  _ListingTagTone _statusTone(BuildContext context, ListingStatus status) {
+    final scheme = Theme.of(context).colorScheme;
+    switch (status) {
+      case ListingStatus.active:
+        return _ListingTagTone(
+          background: scheme.primaryContainer,
+          foreground: scheme.onPrimaryContainer,
+        );
+      case ListingStatus.sold:
+        return _ListingTagTone(
+          background: Colors.green.shade100,
+          foreground: Colors.green.shade900,
+        );
+      case ListingStatus.archived:
+        return _ListingTagTone(
+          background: scheme.surfaceVariant,
+          foreground: scheme.onSurfaceVariant,
+        );
+    }
+  }
+
+  _ListingTagTone _urgentTone(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return _ListingTagTone(
+      background: scheme.errorContainer,
+      foreground: scheme.onErrorContainer,
+    );
+  }
+
+  String _urgentLabel(Listing listing) {
+    if (listing.hasUrgentTimer && listing.urgentUntil != null) {
+      return 'Urgent · ${_formatUrgentTimeLeft(listing.urgentUntil!)} left';
+    }
+    return 'Urgent';
+  }
+
+  String _formatUrgentTimeLeft(DateTime urgentUntil) {
+    final diff = urgentUntil.difference(DateTime.now());
+    if (diff.isNegative) {
+      return '<1m';
+    }
+    if (diff.inMinutes < 1) {
+      return '<1m';
+    }
+    if (diff.inHours < 1) {
+      return '${diff.inMinutes}m';
+    }
+    if (diff.inHours < 24) {
+      return '${diff.inHours}h';
+    }
+    return '${diff.inDays}d';
+  }
+}
+
+class _ListingTagTone {
+  const _ListingTagTone({
+    required this.background,
+    required this.foreground,
+  });
+
+  final Color background;
+  final Color foreground;
+
+  Color get border => foreground.withOpacity(0.28);
 }
 
 class _IncomingOfferTile extends StatelessWidget {
   const _IncomingOfferTile({
+    required this.listing,
     required this.offer,
     required this.busy,
     required this.onAccept,
     required this.onDecline,
+    required this.onMarkPickedUp,
+    required this.onMarkReturned,
     required this.onOpenRequesterProfile,
   });
 
+  final Listing listing;
   final ListingOffer offer;
   final bool busy;
   final Future<void> Function() onAccept;
   final Future<void> Function() onDecline;
+  final Future<void> Function() onMarkPickedUp;
+  final Future<void> Function() onMarkReturned;
   final VoidCallback onOpenRequesterProfile;
 
   @override
@@ -447,7 +876,11 @@ class _IncomingOfferTile extends StatelessWidget {
                   onTap: onOpenRequesterProfile,
                 ),
               ),
-              _OfferStatusChip(status: offer.status),
+              _OfferStatusChip(
+                status: offer.status,
+                isInUse: offer.pickedUpAt != null,
+                isReturned: offer.returnedAt != null,
+              ),
             ],
           ),
           const SizedBox(height: 4),
@@ -455,6 +888,24 @@ class _IncomingOfferTile extends StatelessWidget {
             _timeText(offer.createdAt),
             style: Theme.of(context).textTheme.labelSmall,
           ),
+          if (offer.status == OfferStatus.accepted && offer.pickedUpAt != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              _pickedUpText(
+                pickedUpAt: offer.pickedUpAt!,
+                dueAt: offer.returnDueAt,
+                listingType: listing.type,
+              ),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+          if (offer.status == OfferStatus.accepted && offer.returnedAt != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Marked returned by lender.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
           if (offer.status == OfferStatus.pending) ...[
             const SizedBox(height: 10),
             Row(
@@ -477,6 +928,32 @@ class _IncomingOfferTile extends StatelessWidget {
           ] else if (offer.status == OfferStatus.accepted) ...[
             const SizedBox(height: 10),
             _AcceptedContactCard(userId: offer.requesterId),
+            if (listing.isLend) ...[
+              const SizedBox(height: 10),
+              if (offer.returnedAt != null)
+                Text(
+                  'Marked returned.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                )
+              else if (offer.pickedUpAt == null)
+                FilledButton.tonalIcon(
+                  onPressed: busy ? null : onMarkPickedUp,
+                  icon: const Icon(Icons.inventory_2_outlined),
+                  label: const Text('Mark as picked up'),
+                )
+              else ...[
+                _BorrowDurationSummary(
+                  pickedUpAt: offer.pickedUpAt!,
+                  returnDueAt: offer.returnDueAt,
+                ),
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  onPressed: busy ? null : onMarkReturned,
+                  icon: const Icon(Icons.assignment_return_outlined),
+                  label: const Text('Mark returned'),
+                ),
+              ],
+            ],
           ],
         ],
       ),
@@ -502,6 +979,122 @@ class _IncomingOfferTile extends StatelessWidget {
     }
     final weeks = (diff.inDays / 7).floor();
     return 'Received ${weeks}w ago';
+  }
+
+  String _pickedUpText({
+    required DateTime pickedUpAt,
+    required DateTime? dueAt,
+    required ListingType listingType,
+  }) {
+    final now = DateTime.now();
+    final heldDays = now.difference(pickedUpAt).inDays;
+    final displayHeldDays = heldDays < 0 ? 1 : heldDays + 1;
+    final dueText = dueAt == null ? 'No due date set' : 'Due ${_formatDate(dueAt)}';
+    if (listingType == ListingType.borrow) {
+      if (dueAt == null) {
+        return 'Return date not set yet.';
+      }
+      final dueDateText = _formatDate(dueAt);
+      final dayDelta = _calendarDayDelta(now, dueAt);
+      if (dayDelta > 0) {
+        return '$dayDelta day${dayDelta == 1 ? '' : 's'} left to return. Return by $dueDateText.';
+      }
+
+      final remaining = dueAt.difference(now);
+      if (remaining.isNegative) {
+        final overdueDays = _calendarDayDelta(dueAt, now);
+        if (overdueDays <= 0) {
+          return 'Overdue. Return date was $dueDateText.';
+        }
+        return 'Overdue by $overdueDays day${overdueDays == 1 ? '' : 's'}. Return date was $dueDateText.';
+      }
+      return '${_formatHoursMinutes(remaining)} left to return. Return by $dueDateText.';
+    }
+    return 'Borrower has had this for $displayHeldDays day${displayHeldDays == 1 ? '' : 's'}. $dueText';
+  }
+
+  int _calendarDayDelta(DateTime from, DateTime to) {
+    final fromDay = DateTime(from.year, from.month, from.day);
+    final toDay = DateTime(to.year, to.month, to.day);
+    return toDay.difference(fromDay).inDays;
+  }
+
+  String _formatHoursMinutes(Duration remaining) {
+    final minutesTotal = remaining.inMinutes <= 0 ? 1 : remaining.inMinutes;
+    final hours = minutesTotal ~/ 60;
+    final minutes = minutesTotal % 60;
+    if (hours <= 0) {
+      return '${minutes == 0 ? 1 : minutes}m';
+    }
+    return '${hours}h ${minutes}m';
+  }
+
+  String _formatDate(DateTime date) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return '${months[date.month - 1]} ${date.day}, ${date.year}';
+  }
+}
+
+class _BorrowDurationSummary extends StatelessWidget {
+  const _BorrowDurationSummary({
+    required this.pickedUpAt,
+    required this.returnDueAt,
+  });
+
+  final DateTime pickedUpAt;
+  final DateTime? returnDueAt;
+
+  @override
+  Widget build(BuildContext context) {
+    final daysHeld = DateTime.now().difference(pickedUpAt).inDays;
+    final displayHeldDays = daysHeld < 0 ? 1 : daysHeld + 1;
+    final dueText = returnDueAt == null
+        ? 'No due date set'
+        : 'Due ${_formatDate(returnDueAt!)}';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.35),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        'Borrower has had this item for $displayHeldDays day${displayHeldDays == 1 ? '' : 's'}.\n$dueText',
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
+    );
+  }
+
+  String _formatDate(DateTime date) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return '${months[date.month - 1]} ${date.day}, ${date.year}';
   }
 }
 
@@ -650,29 +1243,50 @@ class _ContactContainer extends StatelessWidget {
 }
 
 class _OfferStatusChip extends StatelessWidget {
-  const _OfferStatusChip({required this.status});
+  const _OfferStatusChip({
+    required this.status,
+    this.isInUse = false,
+    this.isReturned = false,
+  });
 
   final OfferStatus status;
+  final bool isInUse;
+  final bool isReturned;
 
   @override
   Widget build(BuildContext context) {
+    if (isReturned) {
+      return Chip(
+        backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+        label: const Text('Returned'),
+      );
+    }
+
     final color = switch (status) {
       OfferStatus.pending => Theme.of(context).colorScheme.secondaryContainer,
       OfferStatus.accepted => Colors.green.shade100,
       OfferStatus.declined => Theme.of(context).colorScheme.errorContainer,
     };
 
-    final label = switch (status) {
-      OfferStatus.pending => 'Pending',
-      OfferStatus.accepted => 'Accepted',
-      OfferStatus.declined => 'Declined',
-    };
+    final label =
+        status == OfferStatus.accepted
+            ? (isInUse ? 'In Use' : 'Matched')
+            : switch (status) {
+                OfferStatus.pending => 'Pending',
+                OfferStatus.accepted => 'Matched',
+                OfferStatus.declined => 'Declined',
+              };
 
     return Chip(
       backgroundColor: color,
       label: Text(label),
     );
   }
+}
+
+enum _RelistAction {
+  now,
+  withEdits,
 }
 
 class _ListingThumb extends StatelessWidget {

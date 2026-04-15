@@ -103,6 +103,8 @@ class _NotificationRow extends StatelessWidget {
             );
           case AppNotificationType.offerAccepted:
           case AppNotificationType.offerDeclined:
+          case AppNotificationType.returnDueSoonLender:
+          case AppNotificationType.returnDueSoonBorrower:
             Navigator.of(context).pop(
               const NotificationsPageIntent(
                 destination: NotificationsPageDestination.offers,
@@ -112,6 +114,15 @@ class _NotificationRow extends StatelessWidget {
             Navigator.of(context).pop(
               NotificationsPageIntent(
                 destination: NotificationsPageDestination.home,
+                listingId: item.listingId?.trim().isEmpty == true
+                    ? null
+                    : item.listingId?.trim(),
+              ),
+            );
+          case AppNotificationType.urgentNoResponse:
+            Navigator.of(context).pop(
+              NotificationsPageIntent(
+                destination: NotificationsPageDestination.listings,
                 listingId: item.listingId?.trim().isEmpty == true
                     ? null
                     : item.listingId?.trim(),
@@ -177,6 +188,11 @@ class _NotificationRow extends StatelessWidget {
         return Icons.highlight_off_outlined;
       case AppNotificationType.urgentBorrowPosted:
         return Icons.notification_important_outlined;
+      case AppNotificationType.urgentNoResponse:
+        return Icons.timer_off_outlined;
+      case AppNotificationType.returnDueSoonLender:
+      case AppNotificationType.returnDueSoonBorrower:
+        return Icons.event_repeat_outlined;
     }
   }
 

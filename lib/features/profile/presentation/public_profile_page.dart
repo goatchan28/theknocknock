@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../../models/listing.dart';
 import '../../../models/public_profile.dart';
+import '../../../providers/auth_controller.dart';
 import '../../../services/listing_service.dart';
 import '../../../services/public_profile_service.dart';
 import '../../listings/presentation/listing_detail_page.dart';
@@ -19,6 +20,8 @@ class PublicProfilePage extends StatelessWidget {
   Widget build(BuildContext context) {
     final profileService = context.read<PublicProfileService>();
     final listingService = context.read<ListingService>();
+    final currentUserId = context.watch<AuthController>().firebaseUser?.uid;
+    final canReportUser = currentUserId != null && currentUserId != userId;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Profile')),
@@ -73,6 +76,21 @@ class PublicProfilePage extends StatelessWidget {
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                     ),
+                  if (canReportUser) ...[
+                    const SizedBox(height: 6),
+                    Center(
+                      child: TextButton.icon(
+                        onPressed: () => _showReportUserDialog(
+                          context,
+                          listingService: listingService,
+                          reporterId: currentUserId,
+                          profile: profile,
+                        ),
+                        icon: const Icon(Icons.flag_outlined),
+                        label: const Text('Report user'),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   Row(
                     children: [
@@ -129,6 +147,81 @@ class PublicProfilePage extends StatelessWidget {
     final month = date.month.toString().padLeft(2, '0');
     final day = date.day.toString().padLeft(2, '0');
     return '$month/$day/${date.year}';
+  }
+
+  Future<void> _showReportUserDialog(
+    BuildContext context, {
+    required ListingService listingService,
+    required String? reporterId,
+    required PublicProfile profile,
+  }) async {
+    if (reporterId == null || reporterId.isEmpty) {
+      return;
+    }
+
+    final reasonController = TextEditingController();
+
+    final submitted = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Report user'),
+          content: TextField(
+            controller: reasonController,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              hintText: 'Tell us what happened with this user.',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Submit'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (submitted != true || !context.mounted) {
+      return;
+    }
+
+    final reason = reasonController.text.trim().isEmpty
+        ? 'No additional details.'
+        : reasonController.text.trim();
+
+    try {
+      await listingService.submitUserReport(
+        reportedUserId: profile.uid,
+        reporterId: reporterId,
+        reason: reason,
+        reportedDisplayName: profile.displayName,
+      );
+
+      if (!context.mounted) {
+        return;
+      }
+
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.clearSnackBars();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('User report submitted.')),
+      );
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.clearSnackBars();
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not submit report: $error')),
+      );
+    }
   }
 }
 
@@ -222,11 +315,15 @@ class _PublicListingRow extends StatelessWidget {
   }
 
   String _metaText(Listing listing) {
-    final statusLabel = switch (listing.status) {
-      ListingStatus.active => 'Active',
-      ListingStatus.archived => 'In Use',
-      ListingStatus.sold => 'In Use',
-    };
+    final statusLabel = listing.returnedFromMatch
+        ? 'Returned'
+        : switch (listing.status) {
+            ListingStatus.active => 'Active',
+            ListingStatus.archived => listing.archivedFromSold
+                ? (listing.pickedUpAt == null ? 'Matched' : 'In Use')
+                : 'Archived',
+            ListingStatus.sold => listing.pickedUpAt == null ? 'Matched' : 'In Use',
+          };
     final posted = _timeText(listing.createdAt);
     return '$statusLabel · $posted';
   }

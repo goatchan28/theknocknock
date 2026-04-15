@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -10,7 +12,16 @@ import '../../listings/presentation/listing_detail_page.dart';
 import 'manage_listing_page.dart';
 
 class MyListingsPage extends StatefulWidget {
-  const MyListingsPage({super.key});
+  const MyListingsPage({
+    super.key,
+    this.fixedType,
+    this.embedded = false,
+    this.showPostButton = true,
+  });
+
+  final ListingType? fixedType;
+  final bool embedded;
+  final bool showPostButton;
 
   @override
   State<MyListingsPage> createState() => _MyListingsPageState();
@@ -22,21 +33,37 @@ class _MyListingsPageState extends State<MyListingsPage> {
   Stream<List<Listing>>? _ownerListingsStream;
   Stream<Map<String, int>>? _offerCountsStream;
   String? _streamsUid;
+  Timer? _urgentTicker;
 
-  final Set<ListingType> _selectedTypes = {
-    ListingType.lend,
-    ListingType.borrow,
-  };
+  late final Set<ListingType> _selectedTypes;
 
   final Set<_ActivityFilter> _selectedActivity = {
     _ActivityFilter.active,
-    _ActivityFilter.inactive,
+    _ActivityFilter.inUse,
   };
 
   String _search = '';
 
   @override
+  void initState() {
+    super.initState();
+    _selectedTypes = widget.fixedType == null
+        ? {
+            ListingType.lend,
+            ListingType.borrow,
+          }
+        : {widget.fixedType!};
+    _urgentTicker = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {});
+    });
+  }
+
+  @override
   void dispose() {
+    _urgentTicker?.cancel();
     _searchController.dispose();
     _searchFocusNode.dispose();
     super.dispose();
@@ -129,57 +156,65 @@ class _MyListingsPageState extends State<MyListingsPage> {
             final offerCounts = offerSnapshot.data ?? const <String, int>{};
             final filtered = _sortByOfferPriority(baseFiltered, offerCounts);
 
-            return Scaffold(
-              body: ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  _buildSearchAndFilterBar(),
-                  const SizedBox(height: 10),
-                  const SizedBox(height: 6),
-                  if (listings.isEmpty)
-                    const _EmptyState(
-                      message: 'You have not posted any listings yet.',
-                    )
-                  else if (filtered.isEmpty)
-                    const _EmptyState(
-                      message: 'No listings match your search/filter.',
-                    )
-                  else
-                    ...filtered.map((listing) {
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: _ListingRow(
-                          listing: listing,
-                          offerCount: offerCounts[listing.id] ?? 0,
-                          onToggleArchive: () => _toggleArchive(listing),
-                          onTap: () => _openManagePage(listing),
-                        ),
-                      );
-                    }),
-                  const SizedBox(height: 80),
-                ],
-              ),
-              floatingActionButton: FloatingActionButton.extended(
-                onPressed: () async {
-                  final result = await showCreateListingSheet(context);
-                  if (!context.mounted || result == null) {
-                    return;
-                  }
-                  if (result.action == CreateListingNextAction.viewListing) {
-                    final listingId = result.listingId?.trim() ?? '';
-                    if (listingId.isEmpty) {
-                      return;
-                    }
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => ListingDetailPage(listingId: listingId),
+            final body = ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                _buildSearchAndFilterBar(),
+                const SizedBox(height: 10),
+                const SizedBox(height: 6),
+                if (listings.isEmpty)
+                  const _EmptyState(
+                    message: 'You have not posted any listings yet.',
+                  )
+                else if (filtered.isEmpty)
+                  const _EmptyState(
+                    message: 'No listings match your search/filter.',
+                  )
+                else
+                  ...filtered.map((listing) {
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: _ListingRow(
+                        listing: listing,
+                        offerCount: offerCounts[listing.id] ?? 0,
+                        onToggleArchive: () => _toggleArchive(listing),
+                        onTap: () => _openManagePage(listing),
                       ),
                     );
-                  }
-                },
-                icon: const Icon(Icons.add),
-                label: const Text('Post'),
-              ),
+                  }),
+                if (!widget.embedded) const SizedBox(height: 80),
+              ],
+            );
+
+            if (widget.embedded) {
+              return body;
+            }
+
+            return Scaffold(
+              body: body,
+              floatingActionButton: widget.showPostButton
+                  ? FloatingActionButton.extended(
+                      onPressed: () async {
+                        final result = await showCreateListingSheet(context);
+                        if (!context.mounted || result == null) {
+                          return;
+                        }
+                        if (result.action == CreateListingNextAction.viewListing) {
+                          final listingId = result.listingId?.trim() ?? '';
+                          if (listingId.isEmpty) {
+                            return;
+                          }
+                          await Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => ListingDetailPage(listingId: listingId),
+                            ),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.add),
+                      label: const Text('Post'),
+                    )
+                  : null,
             );
           },
         );
@@ -190,18 +225,33 @@ class _MyListingsPageState extends State<MyListingsPage> {
   List<Listing> _applyFilters(List<Listing> input) {
     return input.where((listing) {
       final normalizedSearch = _search.trim().toLowerCase();
-      final matchesSearch = normalizedSearch.isEmpty ||
-          listing.title.toLowerCase().contains(normalizedSearch);
+      final matchesSearch =
+          normalizedSearch.isEmpty || _matchesTitlePrefix(listing.title, normalizedSearch);
 
       final matchesType = _selectedTypes.contains(listing.type);
 
-      final isInactive = listing.status != ListingStatus.active;
-      final matchesActivity = (listing.status == ListingStatus.active &&
+      final isReturned = listing.returnedFromMatch;
+      final isArchived = listing.status == ListingStatus.archived && !isReturned;
+      final isInUse = listing.status == ListingStatus.sold;
+      final isActive = listing.status == ListingStatus.active;
+      final matchesActivity = (isActive &&
               _selectedActivity.contains(_ActivityFilter.active)) ||
-          (isInactive && _selectedActivity.contains(_ActivityFilter.inactive));
+          (isInUse && _selectedActivity.contains(_ActivityFilter.inUse)) ||
+          (isArchived && _selectedActivity.contains(_ActivityFilter.archived)) ||
+          (isReturned && _selectedActivity.contains(_ActivityFilter.returned));
 
       return matchesSearch && matchesType && matchesActivity;
     }).toList();
+  }
+
+  bool _matchesTitlePrefix(String rawTitle, String normalizedSearch) {
+    final title = rawTitle.trim().toLowerCase();
+    if (title.startsWith(normalizedSearch)) {
+      return true;
+    }
+
+    final words = title.split(RegExp(r'\s+'));
+    return words.any((word) => word.startsWith(normalizedSearch));
   }
 
   List<Listing> _sortByOfferPriority(
@@ -242,6 +292,7 @@ class _MyListingsPageState extends State<MyListingsPage> {
             ),
             onChanged: _applySearchLive,
             onSubmitted: _applySearch,
+            onTapOutside: (_) => _searchFocusNode.unfocus(),
           ),
         ),
         const SizedBox(width: 10),
@@ -296,20 +347,24 @@ class _MyListingsPageState extends State<MyListingsPage> {
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 12),
-                    Text('Type', style: Theme.of(context).textTheme.titleMedium),
-                    CheckboxListTile(
-                      value: tempTypes.contains(ListingType.lend),
-                      onChanged: (value) => toggleType(ListingType.lend, value ?? false),
-                      title: const Text('Lend'),
-                      controlAffinity: ListTileControlAffinity.leading,
-                    ),
-                    CheckboxListTile(
-                      value: tempTypes.contains(ListingType.borrow),
-                      onChanged: (value) => toggleType(ListingType.borrow, value ?? false),
-                      title: const Text('Borrow'),
-                      controlAffinity: ListTileControlAffinity.leading,
-                    ),
-                    const SizedBox(height: 8),
+                    if (widget.fixedType == null) ...[
+                      Text('Type', style: Theme.of(context).textTheme.titleMedium),
+                      CheckboxListTile(
+                        value: tempTypes.contains(ListingType.lend),
+                        onChanged: (value) =>
+                            toggleType(ListingType.lend, value ?? false),
+                        title: const Text('Lend'),
+                        controlAffinity: ListTileControlAffinity.leading,
+                      ),
+                      CheckboxListTile(
+                        value: tempTypes.contains(ListingType.borrow),
+                        onChanged: (value) =>
+                            toggleType(ListingType.borrow, value ?? false),
+                        title: const Text('Borrow'),
+                        controlAffinity: ListTileControlAffinity.leading,
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     Text('Status', style: Theme.of(context).textTheme.titleMedium),
                     CheckboxListTile(
                       value: tempActivity.contains(_ActivityFilter.active),
@@ -319,10 +374,24 @@ class _MyListingsPageState extends State<MyListingsPage> {
                       controlAffinity: ListTileControlAffinity.leading,
                     ),
                     CheckboxListTile(
-                      value: tempActivity.contains(_ActivityFilter.inactive),
+                      value: tempActivity.contains(_ActivityFilter.inUse),
                       onChanged: (value) =>
-                          toggleActivity(_ActivityFilter.inactive, value ?? false),
-                      title: const Text('Inactive (Archived/In Use)'),
+                          toggleActivity(_ActivityFilter.inUse, value ?? false),
+                      title: const Text('In Use / Matched'),
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                    CheckboxListTile(
+                      value: tempActivity.contains(_ActivityFilter.archived),
+                      onChanged: (value) =>
+                          toggleActivity(_ActivityFilter.archived, value ?? false),
+                      title: const Text('Archived'),
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                    CheckboxListTile(
+                      value: tempActivity.contains(_ActivityFilter.returned),
+                      onChanged: (value) =>
+                          toggleActivity(_ActivityFilter.returned, value ?? false),
+                      title: const Text('Returned'),
                       controlAffinity: ListTileControlAffinity.leading,
                     ),
                     const SizedBox(height: 12),
@@ -332,16 +401,18 @@ class _MyListingsPageState extends State<MyListingsPage> {
                           child: OutlinedButton(
                             onPressed: () {
                               Navigator.of(context).pop(
-                                const _MyFilterResult(
-                                  types: {ListingType.lend, ListingType.borrow},
+                                _MyFilterResult(
+                                  types: widget.fixedType == null
+                                      ? {ListingType.lend, ListingType.borrow}
+                                      : {widget.fixedType!},
                                   activity: {
                                     _ActivityFilter.active,
-                                    _ActivityFilter.inactive,
+                                    _ActivityFilter.inUse,
                                   },
                                 ),
                               );
                             },
-                            child: const Text('Clear'),
+                            child: const Text('Reset'),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -392,10 +463,12 @@ class _MyListingsPageState extends State<MyListingsPage> {
     }
 
     final shouldArchive = listing.status != ListingStatus.archived;
-    final reopeningToSold =
-        listing.status == ListingStatus.archived &&
-            (listing.hasAcceptedMatch || listing.archivedFromSold);
-
+    final isInUse =
+        listing.status == ListingStatus.sold && listing.pickedUpAt != null;
+    if (shouldArchive && isInUse) {
+      _showMessage('In-use listings cannot be archived.');
+      return;
+    }
     try {
       await context.read<ListingService>().setListingArchived(
             listingId: listing.id,
@@ -408,9 +481,7 @@ class _MyListingsPageState extends State<MyListingsPage> {
       _showMessage(
         shouldArchive
             ? 'Listing archived.'
-            : reopeningToSold
-                ? 'Listing unarchived to in use.'
-                : 'Listing unarchived.',
+            : 'Listing unarchived and relisted as active.',
       );
     } catch (error) {
       if (!mounted) {
@@ -450,12 +521,15 @@ class _ListingRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final typeTone = _typeTone(context, listing.type);
     final statusTone = _statusTone(context, listing.status);
+    final urgentTone = _urgentTone(context);
+    final isInUse =
+        listing.status == ListingStatus.sold && listing.pickedUpAt != null;
+    final canSwipeArchive = !listing.returnedFromMatch && !isInUse;
 
     return Dismissible(
       key: ValueKey('my_${listing.id}'),
-      direction: DismissDirection.endToStart,
+      direction: canSwipeArchive ? DismissDirection.endToStart : DismissDirection.none,
       background: const SizedBox.shrink(),
       confirmDismiss: (_) async {
         await onToggleArchive();
@@ -471,7 +545,11 @@ class _ListingRow extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(listing.status == ListingStatus.archived ? 'Unarchive' : 'Archive'),
+            Text(
+              listing.returnedFromMatch
+                  ? 'Returned'
+                  : (listing.status == ListingStatus.archived ? 'Unarchive' : 'Archive'),
+            ),
             const SizedBox(width: 8),
             const Icon(Icons.archive_outlined),
           ],
@@ -523,18 +601,20 @@ class _ListingRow extends StatelessWidget {
                           spacing: 6,
                           runSpacing: 6,
                           children: [
-                            Chip(
-                              label:
-                                  Text(listing.type == ListingType.lend ? 'Lend' : 'Borrow'),
-                              backgroundColor: typeTone.background,
-                              side: BorderSide(color: typeTone.border),
-                              labelStyle: TextStyle(
-                                color: typeTone.foreground,
-                                fontWeight: FontWeight.w600,
+                            if (listing.isBorrow &&
+                                listing.status == ListingStatus.active &&
+                                listing.isUrgent)
+                              Chip(
+                                label: Text(_urgentLabel(listing)),
+                                backgroundColor: urgentTone.background,
+                                side: BorderSide(color: urgentTone.border),
+                                labelStyle: TextStyle(
+                                  color: urgentTone.foreground,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
-                            ),
                             Chip(
-                              label: Text(_statusLabel(listing.status)),
+                              label: Text(_statusLabel(listing)),
                               backgroundColor: statusTone.background,
                               side: BorderSide(color: statusTone.border),
                               labelStyle: TextStyle(
@@ -544,12 +624,19 @@ class _ListingRow extends StatelessWidget {
                             ),
                           ],
                         ),
+                        if (_inUseSummary(listing) case final summary?) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            summary,
+                            style: Theme.of(context).textTheme.labelSmall,
+                          ),
+                        ],
                         if (listing.status == ListingStatus.archived) ...[
                           const SizedBox(height: 4),
                           Text(
-                            (listing.hasAcceptedMatch || listing.archivedFromSold)
-                                ? 'Swipe left to unarchive to in use'
-                                : 'Swipe left to unarchive',
+                            listing.returnedFromMatch
+                                ? 'Returned listing. Use relist for a new post.'
+                                : 'Swipe left to unarchive as active',
                             style: Theme.of(context).textTheme.labelSmall,
                           ),
                         ],
@@ -573,31 +660,92 @@ class _ListingRow extends StatelessWidget {
     );
   }
 
-  static String _statusLabel(ListingStatus status) {
-    switch (status) {
+  static String _statusLabel(Listing listing) {
+    if (listing.returnedFromMatch) {
+      return 'Returned';
+    }
+    switch (listing.status) {
       case ListingStatus.active:
         return 'Active';
       case ListingStatus.archived:
         return 'Archived';
       case ListingStatus.sold:
-        return 'In Use';
+        return listing.pickedUpAt == null ? 'Matched' : 'In Use';
     }
   }
 
-  static _ChipTone _typeTone(BuildContext context, ListingType type) {
-    final scheme = Theme.of(context).colorScheme;
-    switch (type) {
-      case ListingType.lend:
-        return _ChipTone(
-          background: scheme.tertiaryContainer,
-          foreground: scheme.onTertiaryContainer,
-        );
-      case ListingType.borrow:
-        return _ChipTone(
-          background: scheme.secondaryContainer,
-          foreground: scheme.onSecondaryContainer,
-        );
+  static String? _inUseSummary(Listing listing) {
+    final pickedUpAt = listing.pickedUpAt;
+    final isInUse = pickedUpAt != null &&
+        (listing.status == ListingStatus.sold ||
+            (listing.status == ListingStatus.archived && listing.archivedFromSold));
+    if (!isInUse) {
+      return null;
     }
+
+    final now = DateTime.now();
+    final daysHeld = now.difference(pickedUpAt!).inDays;
+    final displayHeldDays = daysHeld < 0 ? 1 : daysHeld + 1;
+    final dueText = listing.returnDueAt == null
+        ? 'No return date set'
+        : 'Due ${_formatDate(listing.returnDueAt!)}';
+
+    if (listing.type == ListingType.borrow) {
+      final dueAt = listing.returnDueAt;
+      if (dueAt == null) {
+        return 'Return date not set yet.';
+      }
+      final dueDateText = _formatDate(dueAt);
+      final dayDelta = _calendarDayDelta(now, dueAt);
+      if (dayDelta > 0) {
+        return '$dayDelta day${dayDelta == 1 ? '' : 's'} left to return. Return by $dueDateText.';
+      }
+
+      final remaining = dueAt.difference(now);
+      if (remaining.isNegative) {
+        final overdueDays = _calendarDayDelta(dueAt, now);
+        if (overdueDays <= 0) {
+          return 'Overdue. Return date was $dueDateText.';
+        }
+        return 'Overdue by $overdueDays day${overdueDays == 1 ? '' : 's'}. Return date was $dueDateText.';
+      }
+      return '${_formatHoursMinutes(remaining)} left to return. Return by $dueDateText.';
+    }
+    return 'Lent for $displayHeldDays day${displayHeldDays == 1 ? '' : 's'}. $dueText';
+  }
+
+  static int _calendarDayDelta(DateTime from, DateTime to) {
+    final fromDay = DateTime(from.year, from.month, from.day);
+    final toDay = DateTime(to.year, to.month, to.day);
+    return toDay.difference(fromDay).inDays;
+  }
+
+  static String _formatHoursMinutes(Duration remaining) {
+    final minutesTotal = remaining.inMinutes <= 0 ? 1 : remaining.inMinutes;
+    final hours = minutesTotal ~/ 60;
+    final minutes = minutesTotal % 60;
+    if (hours <= 0) {
+      return '${minutes == 0 ? 1 : minutes}m';
+    }
+    return '${hours}h ${minutes}m';
+  }
+
+  static String _formatDate(DateTime date) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return '${months[date.month - 1]} ${date.day}, ${date.year}';
   }
 
   static _ChipTone _statusTone(BuildContext context, ListingStatus status) {
@@ -620,6 +768,38 @@ class _ListingRow extends StatelessWidget {
         );
     }
   }
+
+  static _ChipTone _urgentTone(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return _ChipTone(
+      background: scheme.errorContainer,
+      foreground: scheme.onErrorContainer,
+    );
+  }
+}
+
+String _formatUrgentTimeLeft(DateTime urgentUntil) {
+  final diff = urgentUntil.difference(DateTime.now());
+  if (diff.isNegative) {
+    return '<1m';
+  }
+  if (diff.inMinutes < 1) {
+    return '<1m';
+  }
+  if (diff.inHours < 1) {
+    return '${diff.inMinutes}m';
+  }
+  if (diff.inHours < 24) {
+    return '${diff.inHours}h';
+  }
+  return '${diff.inDays}d';
+}
+
+String _urgentLabel(Listing listing) {
+  if (listing.hasUrgentTimer && listing.urgentUntil != null) {
+    return 'Urgent · ${_formatUrgentTimeLeft(listing.urgentUntil!)} left';
+  }
+  return 'Urgent';
 }
 
 class _ChipTone {
@@ -709,7 +889,7 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-enum _ActivityFilter { active, inactive }
+enum _ActivityFilter { active, inUse, archived, returned }
 
 class _MyFilterResult {
   const _MyFilterResult({

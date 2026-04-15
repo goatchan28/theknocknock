@@ -7,9 +7,19 @@ service cloud.firestore {
 
     function verifiedColumbiaUser() {
       return signedIn()
-        && request.auth.token.email is string
-        && request.auth.token.email_verified == true
-        && request.auth.token.email.matches('.*@columbia\\.edu$');
+        && (
+          (
+            request.auth.token.email is string
+            && request.auth.token.email.matches('.*@columbia\\.edu$')
+          )
+          || (
+            exists(/databases/$(database)/documents/users/$(request.auth.uid))
+            && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.email
+              is string
+            && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.email
+              .matches('.*@columbia\\.edu$')
+          )
+        );
     }
 
     function isSelf(userId) {
@@ -57,6 +67,150 @@ service cloud.firestore {
         || status == 'declined';
     }
 
+    function requesterCanCloseBorrowMatchListing() {
+      return resource.data.type == 'borrow'
+        && resource.data.status == 'sold'
+        && resource.data.acceptedRequesterId == request.auth.uid
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.status == 'archived'
+        && request.resource.data.acceptedOfferId == null
+        && request.resource.data.acceptedRequesterId == null
+        && request.resource.data.returnedFromMatch == true
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'acceptedOfferId',
+          'acceptedRequesterId',
+          'archivedFromSold',
+          'returnedFromMatch',
+          'pickedUpAt',
+          'returnDueAt',
+          'matchedAt',
+          'returnedAt',
+          'updatedAt'
+        ]);
+    }
+
+    function requesterCanMarkBorrowListingPickedUp(listingId) {
+      return resource.data.type == 'borrow'
+        && resource.data.status == 'sold'
+        && (
+          (
+            resource.data.acceptedRequesterId is string
+            && resource.data.acceptedRequesterId == request.auth.uid
+          )
+          || (
+            resource.data.acceptedOfferId is string
+            && exists(/databases/$(database)/documents/offers/$(resource.data.acceptedOfferId))
+            && get(/databases/$(database)/documents/offers/$(resource.data.acceptedOfferId)).data.requesterId ==
+              request.auth.uid
+            && get(/databases/$(database)/documents/offers/$(resource.data.acceptedOfferId)).data.listingId ==
+              listingId
+            && get(/databases/$(database)/documents/offers/$(resource.data.acceptedOfferId)).data.status ==
+              'accepted'
+          )
+        )
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.acceptedOfferId == resource.data.acceptedOfferId
+        && request.resource.data.acceptedRequesterId == request.auth.uid
+        && resource.data.pickedUpAt == null
+        && request.resource.data.pickedUpAt is timestamp
+        && request.resource.data.returnDueAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function matchedParticipantCanMarkListingPickedUp(listingId) {
+      return resource.data.status == 'sold'
+        && resource.data.acceptedOfferId is string
+        && (
+          resource.data.ownerId == request.auth.uid
+          || resource.data.acceptedRequesterId == request.auth.uid
+        )
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.acceptedOfferId == resource.data.acceptedOfferId
+        && (
+          request.resource.data.acceptedRequesterId == resource.data.acceptedRequesterId
+          || request.resource.data.acceptedRequesterId == request.auth.uid
+          || (
+            resource.data.acceptedRequesterId == null
+            && exists(/databases/$(database)/documents/offers/$(resource.data.acceptedOfferId))
+            && get(/databases/$(database)/documents/offers/$(resource.data.acceptedOfferId)).data.listingId ==
+              listingId
+            && get(/databases/$(database)/documents/offers/$(resource.data.acceptedOfferId)).data.status ==
+              'accepted'
+            && get(/databases/$(database)/documents/offers/$(resource.data.acceptedOfferId)).data.requesterId ==
+              request.resource.data.acceptedRequesterId
+          )
+        )
+        && resource.data.pickedUpAt == null
+        && request.resource.data.pickedUpAt is timestamp
+        && request.resource.data.returnDueAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function matchedOfferParticipantCanManageLifecycle() {
+      return (
+          resource.data.ownerId == request.auth.uid
+          || resource.data.requesterId == request.auth.uid
+        )
+        && resource.data.status == 'accepted'
+        && request.resource.data.status == 'accepted'
+        && request.resource.data.listingId == resource.data.listingId
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.requesterId == resource.data.requesterId
+        && (
+          request.resource.data.listingType == resource.data.listingType
+          || resource.data.listingType == null
+        )
+        && (
+          (
+            resource.data.pickedUpAt == null
+            && request.resource.data.pickedUpAt is timestamp
+            && request.resource.data.returnDueAt is timestamp
+            && request.resource.data.returnedAt == null
+            && request.resource.data.updatedAt is timestamp
+          )
+          || (
+            resource.data.pickedUpAt is timestamp
+            && resource.data.returnedAt == null
+            && request.resource.data.pickedUpAt == resource.data.pickedUpAt
+            && request.resource.data.returnDueAt == resource.data.returnDueAt
+            && request.resource.data.returnedAt is timestamp
+            && request.resource.data.updatedAt is timestamp
+          )
+        );
+    }
+
+    // MVP fallback: allow matched parties to update accepted offer lifecycle
+    // fields without brittle affectedKeys checks.
+    function matchedOfferParticipantCanManageLifecycleFlex() {
+      return resource.data.status == 'accepted'
+        && (resource.data.ownerId == request.auth.uid
+          || resource.data.requesterId == request.auth.uid)
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.listingId == resource.data.listingId
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.requesterId == resource.data.requesterId
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    // MVP fallback: allow matched parties to update sold listing lifecycle
+    // fields without brittle affectedKeys checks.
+    function matchedParticipantCanUpdateSoldListingFlex() {
+      return resource.data.status == 'sold'
+        && (resource.data.ownerId == request.auth.uid
+          || resource.data.acceptedRequesterId == request.auth.uid)
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.acceptedOfferId == resource.data.acceptedOfferId
+        && request.resource.data.updatedAt is timestamp;
+    }
+
     function urgentAlertsEnabledFor(userId) {
       return exists(/databases/$(database)/documents/users/$(userId))
         && get(/databases/$(database)/documents/users/$(userId))
@@ -73,9 +227,21 @@ service cloud.firestore {
     }
 
     function validUrgentOnUpdate(userId) {
+      // Owner unarchive should not be blocked by urgent field validation.
+      return (
+          resource.data.ownerId == userId
+          && resource.data.status == 'archived'
+          && request.resource.data.status == 'active'
+        )
+      // Urgent validation matters only while listing is active.
+      // Accept/sold/archive transitions should not be blocked by urgent fields.
+        || request.resource.data.status != 'active'
+        || request.resource.data.status == null
+      // Urgent validation matters only while listing is active.
+      // Accept/sold/archive transitions should not be blocked by urgent fields.
       // Don't block unrelated listing updates (accept/sold/archive) when urgent
       // fields are unchanged. Only enforce toggle when setting/changing urgentUntil.
-      return request.resource.data.urgentUntil == resource.data.urgentUntil
+        || request.resource.data.urgentUntil == resource.data.urgentUntil
         || request.resource.data.urgentUntil == null
         || (
           request.resource.data.urgentUntil is timestamp
@@ -123,11 +289,20 @@ service cloud.firestore {
         && validUrgentOnCreate(request.resource.data, request.auth.uid);
 
       allow update: if verifiedColumbiaUser()
-        && request.resource.data.ownerId == resource.data.ownerId
-        && resource.data.ownerId == request.auth.uid
+        && (
+          (
+            request.resource.data.ownerId == resource.data.ownerId
+            && resource.data.ownerId == request.auth.uid
+          )
+          || requesterCanCloseBorrowMatchListing()
+          || requesterCanMarkBorrowListingPickedUp(listingId)
+          || matchedParticipantCanMarkListingPickedUp(listingId)
+          || matchedParticipantCanUpdateSoldListingFlex()
+        )
         && validUrgentOnUpdate(request.auth.uid);
 
-      allow delete: if false;
+      allow delete: if verifiedColumbiaUser()
+        && resource.data.ownerId == request.auth.uid;
     }
 
     // Offers are only visible to the owner and requester.
@@ -150,25 +325,28 @@ service cloud.firestore {
 
       allow update: if verifiedColumbiaUser()
         && (
+          // MVP: offer owner can always update status on their own offer docs.
+          // This keeps accept/decline resilient even when extra fields are present.
           (isOfferOwner()
-            && resource.data.status == 'pending'
-            && (
-              request.resource.data.status == 'accepted'
-              || request.resource.data.status == 'declined'
-            ))
+            && validOfferStatus(request.resource.data.status))
           || (
             // Requester can retry after a decline.
             resource.data.requesterId == request.auth.uid
             && resource.data.status == 'declined'
             && request.resource.data.status == 'pending'
           )
-        )
-        && request.resource.data.listingId == resource.data.listingId
-        && request.resource.data.ownerId == resource.data.ownerId
-        && request.resource.data.requesterId == resource.data.requesterId
-        && validOfferStatus(request.resource.data.status);
+          || matchedOfferParticipantCanManageLifecycle()
+          || matchedOfferParticipantCanManageLifecycleFlex()
+        );
 
-      allow delete: if false;
+      allow delete: if verifiedColumbiaUser()
+        && (
+          resource.data.ownerId == request.auth.uid
+          || (
+            resource.data.requesterId == request.auth.uid
+            && resource.data.status == 'pending'
+          )
+        );
     }
 
     // Contact unlock between two matched users. Enables private contact reveal.
@@ -186,34 +364,86 @@ service cloud.firestore {
         && pairId == request.resource.data.userA + '_' + request.resource.data.userB
         && request.resource.data.offerId is string
         && request.resource.data.listingId is string
-        && existsAfter(
-          /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+        && (
+          existsAfter(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          )
+          || exists(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          )
         )
-        && getAfter(
-          /databases/$(database)/documents/offers/$(request.resource.data.offerId)
-        ).data.status == 'accepted'
-        && getAfter(
-          /databases/$(database)/documents/offers/$(request.resource.data.offerId)
-        ).data.listingId == request.resource.data.listingId
-        && request.auth.uid == getAfter(
-          /databases/$(database)/documents/offers/$(request.resource.data.offerId)
-        ).data.ownerId
+        && (
+          getAfter(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          ).data.status == 'accepted'
+          || get(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          ).data.status == 'accepted'
+        )
+        && (
+          getAfter(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          ).data.listingId == request.resource.data.listingId
+          || get(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          ).data.listingId == request.resource.data.listingId
+        )
+        && (
+          request.auth.uid == getAfter(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          ).data.ownerId
+          || request.auth.uid == getAfter(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          ).data.requesterId
+          || request.auth.uid == get(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          ).data.ownerId
+          || request.auth.uid == get(
+            /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+          ).data.requesterId
+        )
         && (
           (
             request.resource.data.userA == request.auth.uid
-            && request.resource.data.userB == getAfter(
-              /databases/$(database)/documents/offers/$(request.resource.data.offerId)
-            ).data.requesterId
+            && (
+              request.resource.data.userB == getAfter(
+                /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+              ).data.requesterId
+              || request.resource.data.userB == get(
+                /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+              ).data.requesterId
+              || request.resource.data.userB == getAfter(
+                /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+              ).data.ownerId
+              || request.resource.data.userB == get(
+                /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+              ).data.ownerId
+            )
           )
           || (
             request.resource.data.userB == request.auth.uid
-            && request.resource.data.userA == getAfter(
-              /databases/$(database)/documents/offers/$(request.resource.data.offerId)
-            ).data.requesterId
+            && (
+              request.resource.data.userA == getAfter(
+                /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+              ).data.requesterId
+              || request.resource.data.userA == get(
+                /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+              ).data.requesterId
+              || request.resource.data.userA == getAfter(
+                /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+              ).data.ownerId
+              || request.resource.data.userA == get(
+                /databases/$(database)/documents/offers/$(request.resource.data.offerId)
+              ).data.ownerId
+            )
           )
         );
 
-      allow delete: if false;
+      allow delete: if verifiedColumbiaUser()
+        && (
+          resource.data.userA == request.auth.uid
+          || resource.data.userB == request.auth.uid
+        );
     }
 
     // In-app notification feed.
@@ -253,8 +483,29 @@ service cloud.firestore {
     match /reports/{reportId} {
       allow create: if verifiedColumbiaUser()
         && request.resource.data.reporterId == request.auth.uid
-        && request.resource.data.listingId is string
-        && request.resource.data.reason is string;
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() > 0
+        && (
+          (
+            (
+              !('reportType' in request.resource.data)
+              || request.resource.data.reportType == 'report_listing'
+            )
+            && request.resource.data.listingId is string
+            && request.resource.data.listingId.size() > 0
+            && (
+              !('targetId' in request.resource.data)
+              || request.resource.data.targetId == request.resource.data.listingId
+            )
+          )
+          || (
+            request.resource.data.reportType == 'report_user'
+            && request.resource.data.reportedUserId is string
+            && request.resource.data.reportedUserId.size() > 0
+            && request.resource.data.reportedUserId != request.auth.uid
+            && request.resource.data.targetId == request.resource.data.reportedUserId
+          )
+        );
 
       allow read, update, delete: if false;
     }

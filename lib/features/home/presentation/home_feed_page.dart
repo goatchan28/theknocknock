@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -27,6 +29,7 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
   Stream<List<Listing>>? _activeListingsStream;
+  Timer? _urgentTicker;
 
   final Set<ListingType> _selectedTypes = {
     ListingType.lend,
@@ -34,6 +37,17 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
   };
   final Set<String> _selectedCategories = <String>{};
   String _search = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _urgentTicker = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {});
+    });
+  }
 
   @override
   void didChangeDependencies() {
@@ -44,6 +58,7 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
 
   @override
   void dispose() {
+    _urgentTicker?.cancel();
     _searchController.dispose();
     _searchFocusNode.dispose();
     super.dispose();
@@ -151,8 +166,8 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
   List<Listing> _applyFilters(List<Listing> input) {
     return input.where((listing) {
       final normalizedSearch = _search.trim().toLowerCase();
-      final matchesSearch = normalizedSearch.isEmpty ||
-          listing.title.toLowerCase().contains(normalizedSearch);
+      final matchesSearch =
+          normalizedSearch.isEmpty || _matchesTitlePrefix(listing.title, normalizedSearch);
 
       final matchesType = _selectedTypes.contains(listing.type);
 
@@ -161,6 +176,16 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
 
       return matchesSearch && matchesType && matchesCategory;
     }).toList();
+  }
+
+  bool _matchesTitlePrefix(String rawTitle, String normalizedSearch) {
+    final title = rawTitle.trim().toLowerCase();
+    if (title.startsWith(normalizedSearch)) {
+      return true;
+    }
+
+    final words = title.split(RegExp(r'\s+'));
+    return words.any((word) => word.startsWith(normalizedSearch));
   }
 
   Set<String> _buildCategoryOptions(List<Listing> listings) {
@@ -192,6 +217,7 @@ class _HomeFeedPageState extends State<HomeFeedPage> {
             ),
             onChanged: _applySearchLive,
             onSubmitted: _applySearch,
+            onTapOutside: (_) => _searchFocusNode.unfocus(),
           ),
         ),
         const SizedBox(width: 10),
@@ -516,9 +542,7 @@ class _ListingTileCard extends StatelessWidget {
                     children: [
                       if (listing.isBorrow && listing.isUrgent)
                         Chip(
-                          label: Text(
-                            'Urgent · ${_formatUrgentTimeLeft(listing.urgentUntil)} left',
-                          ),
+                          label: Text(_urgentLabel(listing)),
                           backgroundColor: urgentTone.background,
                           side: BorderSide(color: urgentTone.border),
                           labelStyle: TextStyle(
@@ -528,13 +552,6 @@ class _ListingTileCard extends StatelessWidget {
                           visualDensity: VisualDensity.compact,
                         ),
                     ],
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    _formatTimeAgo(listing.createdAt),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall,
                   ),
                 ],
               ),
@@ -584,38 +601,10 @@ class _ListingImage extends StatelessWidget {
   }
 }
 
-String _formatTimeAgo(DateTime? dateTime) {
-  if (dateTime == null) {
-    return 'Posted recently';
-  }
-
-  final now = DateTime.now();
-  final diff = now.difference(dateTime);
-
-  if (diff.inMinutes < 1) {
-    return 'Posted just now';
-  }
-  if (diff.inHours < 1) {
-    return 'Posted ${diff.inMinutes}m ago';
-  }
-  if (diff.inDays < 1) {
-    return 'Posted ${diff.inHours}h ago';
-  }
-  if (diff.inDays < 7) {
-    return 'Posted ${diff.inDays}d ago';
-  }
-  final weeks = (diff.inDays / 7).floor();
-  return 'Posted ${weeks}w ago';
-}
-
-String _formatUrgentTimeLeft(DateTime? urgentUntil) {
-  if (urgentUntil == null) {
-    return 'soon';
-  }
-
+String _formatUrgentTimeLeft(DateTime urgentUntil) {
   final diff = urgentUntil.difference(DateTime.now());
   if (diff <= Duration.zero) {
-    return 'ending';
+    return '<1m';
   }
   if (diff.inMinutes < 1) {
     return '<1m';
@@ -627,6 +616,13 @@ String _formatUrgentTimeLeft(DateTime? urgentUntil) {
     return '${diff.inHours}h';
   }
   return '${diff.inDays}d';
+}
+
+String _urgentLabel(Listing listing) {
+  if (listing.hasUrgentTimer && listing.urgentUntil != null) {
+    return 'Urgent · ${_formatUrgentTimeLeft(listing.urgentUntil!)} left';
+  }
+  return 'Urgent';
 }
 
 class _ChipTone {

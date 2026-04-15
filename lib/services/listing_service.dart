@@ -92,6 +92,14 @@ class ListingService {
     });
   }
 
+  Future<Listing?> getListingById(String listingId) async {
+    final snapshot = await _listingsRef.doc(listingId).get();
+    if (!snapshot.exists || snapshot.data() == null) {
+      return null;
+    }
+    return Listing.fromFirestore(snapshot.id, snapshot.data()!);
+  }
+
   Stream<ListingOffer?> watchMyOfferForListing({
     required String listingId,
     required String requesterId,
@@ -105,6 +113,14 @@ class ListingService {
     });
   }
 
+  Future<ListingOffer?> getOfferById(String offerId) async {
+    final snapshot = await _offersRef.doc(offerId).get();
+    if (!snapshot.exists || snapshot.data() == null) {
+      return null;
+    }
+    return ListingOffer.fromFirestore(snapshot.id, snapshot.data()!);
+  }
+
   Stream<List<ListingOffer>> watchMyOffers(String requesterId) {
     return _offersRef
         .where('requesterId', isEqualTo: requesterId)
@@ -115,20 +131,23 @@ class ListingService {
           .map((doc) => ListingOffer.fromFirestore(doc.id, doc.data()))
           .toList();
 
-      final missingTitleListingIds = offers
+      final listingIdsNeedingHydration = offers
           .where(
-            (offer) => offer.listingTitle.trim().isEmpty && offer.listingId.trim().isNotEmpty,
+            (offer) =>
+                offer.listingId.trim().isNotEmpty &&
+                (offer.listingTitle.trim().isEmpty || !offer.hasListingTypeSnapshot),
           )
           .map((offer) => offer.listingId)
           .toSet()
           .toList();
 
-      if (missingTitleListingIds.isNotEmpty) {
+      if (listingIdsNeedingHydration.isNotEmpty) {
         final listingSnapshots = await Future.wait(
-          missingTitleListingIds.map((listingId) => _listingsRef.doc(listingId).get()),
+          listingIdsNeedingHydration.map((listingId) => _listingsRef.doc(listingId).get()),
         );
 
         final titleByListingId = <String, String>{};
+        final typeByListingId = <String, ListingType>{};
         for (final listingSnapshot in listingSnapshots) {
           final data = listingSnapshot.data();
           if (data == null) {
@@ -138,17 +157,29 @@ class ListingService {
           if (title.isNotEmpty) {
             titleByListingId[listingSnapshot.id] = title;
           }
+          final typeRaw = (data['type'] as String?) ?? 'lend';
+          typeByListingId[listingSnapshot.id] =
+              typeRaw.trim().toLowerCase() == 'borrow'
+                  ? ListingType.borrow
+                  : ListingType.lend;
         }
 
         offers = offers.map((offer) {
-          if (offer.listingTitle.trim().isNotEmpty) {
-            return offer;
-          }
           final hydratedTitle = titleByListingId[offer.listingId];
-          if (hydratedTitle == null || hydratedTitle.isEmpty) {
+          final hydratedType = typeByListingId[offer.listingId];
+
+          if (offer.listingTitle.trim().isNotEmpty &&
+              offer.hasListingTypeSnapshot) {
             return offer;
           }
-          return offer.copyWith(listingTitle: hydratedTitle);
+          return offer.copyWith(
+            listingTitle:
+                hydratedTitle == null || hydratedTitle.isEmpty
+                    ? null
+                    : hydratedTitle,
+            listingType: hydratedType,
+            hasListingTypeSnapshot: hydratedType != null,
+          );
         }).toList();
       }
 
@@ -309,6 +340,7 @@ class ListingService {
     required String category,
     required ListingType type,
     String? ownerPhotoUrl,
+    String? existingImageUrl,
     Duration? urgentDuration,
     XFile? image,
   }) async {
@@ -319,7 +351,9 @@ class ListingService {
     );
 
     final docRef = _listingsRef.doc();
-    String? imageUrl;
+    String? imageUrl = (existingImageUrl?.trim().isNotEmpty ?? false)
+        ? existingImageUrl!.trim()
+        : null;
 
     if (image != null) {
       imageUrl = await _uploadListingImage(
@@ -329,11 +363,12 @@ class ListingService {
       );
     }
 
-    final urgentUntil = type == ListingType.borrow && urgentDuration != null
+    final isUrgentBorrow = type == ListingType.borrow && urgentDuration != null;
+    final urgentUntil = isUrgentBorrow
         ? Timestamp.fromDate(DateTime.now().add(urgentDuration))
         : null;
 
-    await docRef.set({
+    final payload = <String, dynamic>{
       'ownerId': ownerId,
       'ownerDisplayName': ownerDisplayName.trim().isEmpty
           ? 'Columbia Student'
@@ -345,12 +380,133 @@ class ListingService {
       'type': type.name,
       'status': 'active',
       'imageUrl': imageUrl,
-      'urgentUntil': urgentUntil,
+      'urgent': isUrgentBorrow,
       'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+    if (urgentUntil != null) {
+      payload['urgentUntil'] = urgentUntil;
+    }
+
+    await docRef.set(payload);
+
+    return docRef.id;
+  }
+
+  Future<void> markListingReturned({
+    required String listingId,
+    required String ownerId,
+  }) async {
+    final listingRef = _listingsRef.doc(listingId);
+    String acceptedOfferId = '';
+    String acceptedRequesterId = '';
+    String listingTitle = '';
+
+    await _firestore.runTransaction((transaction) async {
+      final snapshot = await transaction.get(listingRef);
+      if (!snapshot.exists || snapshot.data() == null) {
+        throw StateError('Listing not found.');
+      }
+
+      final data = snapshot.data()!;
+      if ((data['ownerId'] as String?) != ownerId) {
+        throw StateError('Only the owner can mark this listing as returned.');
+      }
+
+      final currentStatus = (data['status'] as String?) ?? 'active';
+      final listingType = (data['type'] as String?) ?? 'lend';
+      acceptedOfferId = (data['acceptedOfferId'] as String?)?.trim() ?? '';
+      acceptedRequesterId = (data['acceptedRequesterId'] as String?)?.trim() ?? '';
+      listingTitle = ((data['title'] as String?) ?? '').trim();
+      final canMarkReturned = currentStatus == 'sold' ||
+          (currentStatus == 'archived' && acceptedOfferId.isNotEmpty);
+
+      if (listingType != 'lend') {
+        throw StateError('Only lend listings can be marked as returned.');
+      }
+
+      if (!canMarkReturned) {
+        throw StateError('Only in-use listings can be marked as returned.');
+      }
+
+      transaction.update(listingRef, {
+        'status': 'archived',
+        'acceptedOfferId': FieldValue.delete(),
+        'acceptedRequesterId': FieldValue.delete(),
+        'archivedFromSold': FieldValue.delete(),
+        'returnedFromMatch': true,
+        'pickedUpAt': FieldValue.delete(),
+        'returnDueAt': FieldValue.delete(),
+        'matchedAt': FieldValue.delete(),
+        'returnedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (acceptedRequesterId.isNotEmpty) {
+      await _writeNotification(
+        recipientId: acceptedRequesterId,
+        actorId: ownerId,
+        type: 'offer_declined',
+        listingId: listingId,
+        offerId: acceptedOfferId.isEmpty ? null : acceptedOfferId,
+        title: 'Item returned',
+        body:
+            '${listingTitle.isEmpty ? 'This item' : listingTitle} was marked as returned and the match is now closed.',
+      );
+    }
+  }
+
+  Future<String> relistFromListing({
+    required String sourceListingId,
+    required String ownerId,
+  }) async {
+    final sourceSnapshot = await _listingsRef.doc(sourceListingId).get();
+    if (!sourceSnapshot.exists || sourceSnapshot.data() == null) {
+      throw StateError('Original listing not found.');
+    }
+
+    final sourceData = sourceSnapshot.data()!;
+    final sourceOwnerId = (sourceData['ownerId'] as String?) ?? '';
+    if (sourceOwnerId != ownerId) {
+      throw StateError('Only the owner can relist this item.');
+    }
+
+    final title = ((sourceData['title'] as String?) ?? '').trim();
+    if (title.isEmpty) {
+      throw StateError('Cannot relist a listing without a title.');
+    }
+
+    final ownerDisplayName =
+        ((sourceData['ownerDisplayName'] as String?) ?? '').trim();
+    final ownerPhotoUrl = sourceData['ownerPhotoUrl'] as String?;
+    final description = ((sourceData['description'] as String?) ?? '').trim();
+    final category = ((sourceData['category'] as String?) ?? 'Other').trim();
+    final rawType = ((sourceData['type'] as String?) ?? 'lend').trim().toLowerCase();
+    final type = rawType == 'borrow' ? ListingType.borrow : ListingType.lend;
+    final existingImageUrl = (sourceData['imageUrl'] as String?)?.trim();
+
+    final newListingId = await createListing(
+      ownerId: ownerId,
+      ownerDisplayName:
+          ownerDisplayName.isEmpty ? 'Columbia Student' : ownerDisplayName,
+      ownerPhotoUrl: ownerPhotoUrl,
+      title: title,
+      description: description,
+      category: category.isEmpty ? 'Other' : category,
+      type: type,
+      existingImageUrl:
+          existingImageUrl?.isEmpty == true ? null : existingImageUrl,
+      urgentDuration: null,
+      image: null,
+    );
+
+    await _listingsRef.doc(newListingId).update({
+      'relistedFromListingId': sourceListingId,
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
-    return docRef.id;
+    return newListingId;
   }
 
   Future<void> updateListing({
@@ -392,7 +548,8 @@ class ListingService {
       );
     }
 
-    final urgentUntil = type == ListingType.borrow && urgentDuration != null
+    final isUrgentBorrow = type == ListingType.borrow && urgentDuration != null;
+    final urgentUntil = isUrgentBorrow
         ? Timestamp.fromDate(DateTime.now().add(urgentDuration))
         : null;
 
@@ -406,7 +563,8 @@ class ListingService {
       'category': category.trim(),
       'type': type.name,
       'imageUrl': imageUrl,
-      'urgentUntil': urgentUntil,
+      'urgent': isUrgentBorrow,
+      'urgentUntil': urgentUntil ?? FieldValue.delete(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
   }
@@ -417,6 +575,9 @@ class ListingService {
     required bool archived,
   }) async {
     final listingRef = _listingsRef.doc(listingId);
+    String matchedRequesterId = '';
+    String matchedOfferId = '';
+    bool hadMatchedState = false;
 
     await _firestore.runTransaction((transaction) async {
       final snapshot = await transaction.get(listingRef);
@@ -430,29 +591,86 @@ class ListingService {
       }
 
       final currentStatus = (data['status'] as String?) ?? 'active';
-      final acceptedOfferId = (data['acceptedOfferId'] as String?)?.trim() ?? '';
-      final archivedFromSold = data['archivedFromSold'] as bool? ?? false;
-      String nextStatus = currentStatus;
+      final returnedFromMatch =
+          (data['returnedFromMatch'] as bool? ?? false) ||
+          (currentStatus == 'archived' && data['returnedAt'] is Timestamp);
       final updateData = <String, dynamic>{
         'updatedAt': FieldValue.serverTimestamp(),
       };
 
       if (archived) {
-        if (currentStatus == 'active' || currentStatus == 'sold') {
-          nextStatus = 'archived';
+        final isInUse = currentStatus == 'sold' && data['pickedUpAt'] is Timestamp;
+        if (isInUse) {
+          throw StateError('In-use listings cannot be archived.');
         }
-        updateData['archivedFromSold'] = currentStatus == 'sold';
+        hadMatchedState =
+            currentStatus == 'sold' ||
+            ((data['acceptedOfferId'] as String?)?.trim().isNotEmpty ?? false);
+        matchedOfferId = (data['acceptedOfferId'] as String?)?.trim() ?? '';
+        matchedRequesterId =
+            (data['acceptedRequesterId'] as String?)?.trim() ?? '';
+        updateData['status'] = 'archived';
+        updateData['acceptedOfferId'] = FieldValue.delete();
+        updateData['acceptedRequesterId'] = FieldValue.delete();
+        updateData['matchedAt'] = FieldValue.delete();
+        updateData['pickedUpAt'] = FieldValue.delete();
+        updateData['returnDueAt'] = FieldValue.delete();
+        updateData['returnedAt'] = FieldValue.delete();
+        updateData['archivedFromSold'] = FieldValue.delete();
+        updateData['returnedFromMatch'] = FieldValue.delete();
       } else {
         if (currentStatus == 'archived') {
-          nextStatus =
-              (acceptedOfferId.isNotEmpty || archivedFromSold) ? 'sold' : 'active';
+          if (returnedFromMatch) {
+            throw StateError(
+              'Returned listings cannot be unarchived. Use relist instead.',
+            );
+          }
+          updateData['status'] = 'active';
         }
         updateData['archivedFromSold'] = FieldValue.delete();
+        updateData['returnedFromMatch'] = FieldValue.delete();
       }
 
-      updateData['status'] = nextStatus;
       transaction.update(listingRef, updateData);
     });
+
+    if (!archived) {
+      return;
+    }
+
+    while (true) {
+      final offersSnapshot = await _offersRef
+          .where('listingId', isEqualTo: listingId)
+          .where('ownerId', isEqualTo: ownerId)
+          .limit(500)
+          .get();
+
+      if (offersSnapshot.docs.isEmpty) {
+        break;
+      }
+
+      final batch = _firestore.batch();
+      for (final doc in offersSnapshot.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+    }
+
+    final resolvedMatchedRequesterId = matchedRequesterId.isNotEmpty
+        ? matchedRequesterId
+        : _deriveRequesterIdFromOfferId(
+            listingId: listingId,
+            offerId: matchedOfferId,
+          );
+
+    if (hadMatchedState && resolvedMatchedRequesterId.isNotEmpty) {
+      final pairId = contactPairDocumentId(ownerId, resolvedMatchedRequesterId);
+      try {
+        await _contactUnlocksRef.doc(pairId).delete();
+      } catch (_) {
+        // Best-effort cleanup. Listing archive should still succeed.
+      }
+    }
   }
 
   Future<MakeOfferResult> makeOffer({
@@ -509,9 +727,13 @@ class ListingService {
       transaction.set(offerRef, {
         'listingId': listingId,
         'listingTitle': listingTitle ?? '',
+        'listingType': (listingData['type'] as String?) ?? 'lend',
         'ownerId': ownerId,
         'requesterId': requesterId,
         'status': 'pending',
+        'pickedUpAt': FieldValue.delete(),
+        'returnDueAt': FieldValue.delete(),
+        'returnedAt': FieldValue.delete(),
         'liabilityAccepted': true,
         'liabilityAcceptedAt': FieldValue.serverTimestamp(),
         'createdAt': FieldValue.serverTimestamp(),
@@ -550,125 +772,109 @@ class ListingService {
   }) async {
     final listingRef = _listingsRef.doc(listingId);
     final acceptedOfferRef = _offersRef.doc(offerId);
-    String acceptedRequesterId = '';
+    final acceptedRequesterId = _deriveRequesterIdFromOfferId(
+      listingId: listingId,
+      offerId: offerId,
+    );
+    if (acceptedRequesterId.isEmpty) {
+      throw StateError('Offer requester is missing.');
+    }
+
     String listingTitle = '';
 
-    await _firestore.runTransaction((transaction) async {
-      final listingSnapshot = await transaction.get(listingRef);
-      if (!listingSnapshot.exists || listingSnapshot.data() == null) {
-        throw StateError('Listing not found.');
+    try {
+      final listingSnapshot = await listingRef.get();
+      final listingData = listingSnapshot.data();
+      if (listingData != null) {
+        listingTitle = (listingData['title'] as String?)?.trim() ?? '';
       }
+    } catch (_) {
+      // Title hydration is best-effort for notifications only.
+    }
 
-      final listingData = listingSnapshot.data()!;
-      final listingOwner = (listingData['ownerId'] as String?) ?? '';
-      final listingStatus = (listingData['status'] as String?) ?? 'active';
-
-      if (listingOwner != ownerId) {
-        throw StateError('Only the owner can accept offers.');
-      }
-
-      if (listingStatus != 'active') {
-        throw StateError('Listing is no longer active.');
-      }
-
-      final acceptedOfferSnapshot = await transaction.get(acceptedOfferRef);
-      if (!acceptedOfferSnapshot.exists || acceptedOfferSnapshot.data() == null) {
-        throw StateError('Offer no longer exists.');
-      }
-
-      final offerData = acceptedOfferSnapshot.data()!;
-      if ((offerData['ownerId'] as String?) != ownerId ||
-          (offerData['listingId'] as String?) != listingId) {
-        throw StateError('Offer does not belong to this listing.');
-      }
-      final requesterId = (offerData['requesterId'] as String?) ?? '';
-      if (requesterId.isEmpty) {
-        throw StateError('Offer requester is missing.');
-      }
-      acceptedRequesterId = requesterId;
-      listingTitle = (listingData['title'] as String?)?.trim() ?? '';
-
-      final offerStatus = (offerData['status'] as String?) ?? 'pending';
-      if (offerStatus != 'pending') {
-        throw StateError('Only pending offers can be accepted.');
-      }
-
-      transaction.update(acceptedOfferRef, {
-        'status': 'accepted',
-        'acceptedAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-
-      transaction.update(listingRef, {
-        'status': 'sold',
-        'acceptedOfferId': offerId,
-        'acceptedRequesterId': requesterId,
-        'archivedFromSold': FieldValue.delete(),
-        'matchedAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-
-      final pairId = contactPairDocumentId(ownerId, requesterId);
-      final unlockRef = _contactUnlocksRef.doc(pairId);
-      final userA = ownerId.compareTo(requesterId) <= 0 ? ownerId : requesterId;
-      final userB = ownerId.compareTo(requesterId) <= 0 ? requesterId : ownerId;
-
-      transaction.set(unlockRef, {
-        'userA': userA,
-        'userB': userB,
-        'ownerId': ownerId,
-        'requesterId': requesterId,
-        'listingId': listingId,
-        'offerId': offerId,
-        'updatedAt': FieldValue.serverTimestamp(),
-        'createdAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+    final batch = _firestore.batch();
+    batch.update(acceptedOfferRef, {
+      'status': 'accepted',
+      'pickedUpAt': FieldValue.delete(),
+      'returnDueAt': FieldValue.delete(),
+      'returnedAt': FieldValue.delete(),
+      'acceptedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
     });
+    batch.update(listingRef, {
+      'status': 'sold',
+      'acceptedOfferId': offerId,
+      'acceptedRequesterId': acceptedRequesterId,
+      'urgent': false,
+      'urgentUntil': FieldValue.delete(),
+      'archivedFromSold': FieldValue.delete(),
+      'returnedFromMatch': FieldValue.delete(),
+      'pickedUpAt': FieldValue.delete(),
+      'returnDueAt': FieldValue.delete(),
+      'returnedAt': FieldValue.delete(),
+      'matchedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
 
-    final pendingOffersSnapshot = await _offersRef
-        .where('listingId', isEqualTo: listingId)
-        .where('ownerId', isEqualTo: ownerId)
-        .get();
+    if (acceptedRequesterId.isNotEmpty) {
+      await _upsertContactUnlock(
+        ownerId: ownerId,
+        requesterId: acceptedRequesterId,
+        listingId: listingId,
+        offerId: offerId,
+      );
+    }
 
-    if (pendingOffersSnapshot.docs.isNotEmpty) {
-      final batch = _firestore.batch();
-      final declinedNotifications = <({String requesterId, String offerId})>[];
-      for (final doc in pendingOffersSnapshot.docs) {
-        final data = doc.data();
-        if ((data['status'] as String?) != 'pending') {
-          continue;
+    try {
+      final pendingOffersSnapshot = await _offersRef
+          .where('listingId', isEqualTo: listingId)
+          .where('ownerId', isEqualTo: ownerId)
+          .get();
+
+      if (pendingOffersSnapshot.docs.isNotEmpty) {
+        final batch = _firestore.batch();
+        final declinedNotifications = <({String requesterId, String offerId})>[];
+        for (final doc in pendingOffersSnapshot.docs) {
+          final data = doc.data();
+          if ((data['status'] as String?) != 'pending') {
+            continue;
+          }
+          if (doc.id == offerId) {
+            continue;
+          }
+          final declinedRequesterId = (data['requesterId'] as String?) ?? '';
+          batch.update(doc.reference, {
+            'status': 'declined',
+            'declinedReason': 'accepted_other_offer',
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+
+          if (declinedRequesterId.isNotEmpty) {
+            declinedNotifications.add(
+              (requesterId: declinedRequesterId, offerId: doc.id),
+            );
+          }
         }
-        if (doc.id == offerId) {
-          continue;
-        }
-        final declinedRequesterId = (data['requesterId'] as String?) ?? '';
-        batch.update(doc.reference, {
-          'status': 'declined',
-          'declinedReason': 'accepted_other_offer',
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
 
-        if (declinedRequesterId.isNotEmpty) {
-          declinedNotifications.add(
-            (requesterId: declinedRequesterId, offerId: doc.id),
+        await batch.commit();
+
+        for (final item in declinedNotifications) {
+          await _writeNotification(
+            recipientId: item.requesterId,
+            actorId: ownerId,
+            type: 'offer_declined',
+            listingId: listingId,
+            offerId: item.offerId,
+            title: 'Offer declined',
+            body:
+                'Your offer for ${listingTitle.isEmpty ? 'a listing' : listingTitle} was declined.',
           );
         }
       }
-
-      await batch.commit();
-
-      for (final item in declinedNotifications) {
-        await _writeNotification(
-          recipientId: item.requesterId,
-          actorId: ownerId,
-          type: 'offer_declined',
-          listingId: listingId,
-          offerId: item.offerId,
-          title: 'Offer declined',
-          body:
-              'Your offer for ${listingTitle.isEmpty ? 'a listing' : listingTitle} was declined.',
-        );
-      }
+    } catch (_) {
+      // Auto-declining other pending offers is best-effort and should not
+      // revert a successful accept.
     }
 
     if (acceptedRequesterId.isNotEmpty) {
@@ -731,15 +937,262 @@ class ListingService {
     }
   }
 
+  Future<void> cancelPendingOffer({
+    required String offerId,
+    required String requesterId,
+  }) async {
+    final offerRef = _offersRef.doc(offerId);
+
+    await _firestore.runTransaction((transaction) async {
+      final snapshot = await transaction.get(offerRef);
+      if (!snapshot.exists || snapshot.data() == null) {
+        throw StateError('Offer no longer exists.');
+      }
+
+      final data = snapshot.data()!;
+      if ((data['requesterId'] as String?) != requesterId) {
+        throw StateError('Only the requester can cancel this offer.');
+      }
+
+      final status = (data['status'] as String?) ?? 'pending';
+      if (status != 'pending') {
+        throw StateError('Only pending offers can be cancelled.');
+      }
+
+      transaction.delete(offerRef);
+    });
+  }
+
+  Future<void> markOfferPickedUp({
+    required String offerId,
+    required String actorId,
+    required DateTime returnDueAt,
+  }) async {
+    final offerRef = _offersRef.doc(offerId);
+
+    await _firestore.runTransaction((transaction) async {
+      final offerSnapshot = await transaction.get(offerRef);
+      if (!offerSnapshot.exists || offerSnapshot.data() == null) {
+        throw StateError('Offer no longer exists.');
+      }
+
+      final offerData = offerSnapshot.data()!;
+      if ((offerData['status'] as String?) != 'accepted') {
+        throw StateError('Only accepted offers can be marked picked up.');
+      }
+      if (offerData['pickedUpAt'] is Timestamp) {
+        throw StateError('This match is already marked as picked up.');
+      }
+
+      final listingId = (offerData['listingId'] as String?) ?? '';
+      if (listingId.isEmpty) {
+        throw StateError('Listing reference missing on this offer.');
+      }
+
+      final listingRef = _listingsRef.doc(listingId);
+      final listingSnapshot = await transaction.get(listingRef);
+      if (!listingSnapshot.exists || listingSnapshot.data() == null) {
+        throw StateError('Listing not found.');
+      }
+
+      final listingData = listingSnapshot.data()!;
+      final listingType = (listingData['type'] as String?) ?? 'lend';
+      final requesterId = (offerData['requesterId'] as String?) ?? '';
+      final lenderId = listingType == 'borrow'
+          ? requesterId
+          : ((listingData['ownerId'] as String?) ?? '');
+
+      if (lenderId != actorId) {
+        throw StateError('Only the lender can mark pickup.');
+      }
+
+      final acceptedRequesterId = (listingData['acceptedRequesterId'] as String?)?.trim();
+      if ((listingData['acceptedOfferId'] as String?) != offerId ||
+          (acceptedRequesterId != null &&
+              acceptedRequesterId.isNotEmpty &&
+              acceptedRequesterId != requesterId) ||
+          (listingData['status'] as String?) != 'sold') {
+        throw StateError('This offer is not the active matched lender.');
+      }
+      if (listingData['pickedUpAt'] is Timestamp) {
+        throw StateError('This match is already marked as picked up.');
+      }
+
+      transaction.update(offerRef, {
+        'pickedUpAt': FieldValue.serverTimestamp(),
+        'returnDueAt': Timestamp.fromDate(returnDueAt),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      transaction.update(listingRef, {
+        'acceptedRequesterId': requesterId,
+        'pickedUpAt': FieldValue.serverTimestamp(),
+        'returnDueAt': Timestamp.fromDate(returnDueAt),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  Future<void> markOfferReturned({
+    required String offerId,
+    required String actorId,
+  }) async {
+    final offerRef = _offersRef.doc(offerId);
+    String listingId = '';
+    String borrowerId = '';
+    String listingTitle = '';
+
+    await _firestore.runTransaction((transaction) async {
+      final offerSnapshot = await transaction.get(offerRef);
+      if (!offerSnapshot.exists || offerSnapshot.data() == null) {
+        throw StateError('Offer no longer exists.');
+      }
+
+      final offerData = offerSnapshot.data()!;
+      if ((offerData['status'] as String?) != 'accepted') {
+        throw StateError('Only accepted offers can be marked returned.');
+      }
+
+      final pickedUpAt = offerData['pickedUpAt'];
+      if (pickedUpAt is! Timestamp) {
+        throw StateError('Mark as picked up before marking returned.');
+      }
+      if (offerData['returnedAt'] is Timestamp) {
+        throw StateError('This match is already marked returned.');
+      }
+
+      listingId = (offerData['listingId'] as String?) ?? '';
+      if (listingId.isEmpty) {
+        throw StateError('Listing reference missing on this offer.');
+      }
+
+      final listingRef = _listingsRef.doc(listingId);
+      final listingSnapshot = await transaction.get(listingRef);
+      if (!listingSnapshot.exists || listingSnapshot.data() == null) {
+        throw StateError('Listing not found.');
+      }
+
+      final listingData = listingSnapshot.data()!;
+      final listingType = (listingData['type'] as String?) ?? 'lend';
+      final requesterId = (offerData['requesterId'] as String?) ?? '';
+      final ownerId = (listingData['ownerId'] as String?) ?? '';
+      final lenderId = listingType == 'borrow' ? requesterId : ownerId;
+      borrowerId = listingType == 'borrow' ? ownerId : requesterId;
+
+      if (lenderId != actorId) {
+        throw StateError('Only the lender can mark this item returned.');
+      }
+
+      final acceptedRequesterId = (listingData['acceptedRequesterId'] as String?)?.trim();
+      if ((listingData['acceptedOfferId'] as String?) != offerId ||
+          (acceptedRequesterId != null &&
+              acceptedRequesterId.isNotEmpty &&
+              acceptedRequesterId != requesterId) ||
+          (listingData['status'] as String?) != 'sold') {
+        throw StateError('This offer is not the active matched lender.');
+      }
+
+      listingTitle = (listingData['title'] as String?)?.trim() ?? '';
+
+      transaction.update(offerRef, {
+        'returnedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      transaction.update(listingRef, {
+        'status': 'archived',
+        'acceptedOfferId': null,
+        'acceptedRequesterId': null,
+        'urgent': false,
+        'urgentUntil': FieldValue.delete(),
+        'archivedFromSold': FieldValue.delete(),
+        'returnedFromMatch': true,
+        'pickedUpAt': FieldValue.delete(),
+        'returnDueAt': FieldValue.delete(),
+        'matchedAt': FieldValue.delete(),
+        'returnedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (borrowerId.isNotEmpty) {
+      await _writeNotification(
+        recipientId: borrowerId,
+        actorId: actorId,
+        type: 'offer_declined',
+        listingId: listingId,
+        offerId: offerId,
+        title: 'Item returned',
+        body:
+            '${listingTitle.isEmpty ? 'Your matched item' : listingTitle} was marked as returned by the lender.',
+      );
+    }
+  }
+
+  Future<void> markBorrowOfferPickedUp({
+    required String offerId,
+    required String requesterId,
+    required DateTime returnDueAt,
+  }) {
+    return markOfferPickedUp(
+      offerId: offerId,
+      actorId: requesterId,
+      returnDueAt: returnDueAt,
+    );
+  }
+
+  Future<void> markBorrowOfferReturned({
+    required String offerId,
+    required String requesterId,
+  }) {
+    return markOfferReturned(
+      offerId: offerId,
+      actorId: requesterId,
+    );
+  }
+
   Future<void> submitListingReport({
     required String listingId,
     required String reporterId,
     required String reason,
+    String? reportedUserId,
+    String? listingTitle,
   }) async {
+    final normalizedReportedUserId = (reportedUserId ?? '').trim();
     await _reportsRef.add({
+      'reportType': 'report_listing',
+      'targetId': listingId,
       'listingId': listingId,
       'reporterId': reporterId,
       'reason': reason.trim(),
+      'reportedUserId': normalizedReportedUserId.isEmpty
+          ? null
+          : normalizedReportedUserId,
+      'listingTitle': (listingTitle ?? '').trim(),
+      'status': 'open',
+      'source': 'app',
+      'updatedAt': FieldValue.serverTimestamp(),
+      'resolvedAt': null,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> submitUserReport({
+    required String reportedUserId,
+    required String reporterId,
+    required String reason,
+    String? reportedDisplayName,
+  }) async {
+    await _reportsRef.add({
+      'reportType': 'report_user',
+      'targetId': reportedUserId,
+      'reportedUserId': reportedUserId,
+      'reporterId': reporterId,
+      'reason': reason.trim(),
+      'reportedDisplayName': (reportedDisplayName ?? '').trim(),
+      'status': 'open',
+      'source': 'app',
+      'updatedAt': FieldValue.serverTimestamp(),
+      'resolvedAt': null,
       'createdAt': FieldValue.serverTimestamp(),
     });
   }
@@ -760,6 +1213,7 @@ class ListingService {
         'category': 'Dorm Essentials',
         'type': 'lend',
         'status': 'active',
+        'urgent': false,
       },
       {
         'id': 'demo_${ownerId}_borrow_calculator',
@@ -768,6 +1222,7 @@ class ListingService {
         'category': 'School Supplies',
         'type': 'borrow',
         'status': 'active',
+        'urgent': true,
         'urgentUntil': Timestamp.fromDate(
           DateTime.now().add(const Duration(hours: 1)),
         ),
@@ -779,6 +1234,7 @@ class ListingService {
         'category': 'Outdoors',
         'type': 'lend',
         'status': 'active',
+        'urgent': false,
       },
     ];
 
@@ -796,6 +1252,7 @@ class ListingService {
         'category': entry['category'],
         'type': entry['type'],
         'status': entry['status'],
+        'urgent': entry['urgent'],
         'imageUrl': null,
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
@@ -1001,6 +1458,49 @@ class ListingService {
     } catch (_) {
       // Notification failures should not break core offer/listing actions.
     }
+  }
+
+  Future<void> _upsertContactUnlock({
+    required String ownerId,
+    required String requesterId,
+    required String listingId,
+    required String offerId,
+  }) async {
+    if (ownerId.trim().isEmpty || requesterId.trim().isEmpty) {
+      return;
+    }
+
+    final pairId = contactPairDocumentId(ownerId, requesterId);
+    final unlockRef = _contactUnlocksRef.doc(pairId);
+    final userA = ownerId.compareTo(requesterId) <= 0 ? ownerId : requesterId;
+    final userB = ownerId.compareTo(requesterId) <= 0 ? requesterId : ownerId;
+
+    try {
+      await unlockRef.set({
+        'userA': userA,
+        'userB': userB,
+        'ownerId': ownerId,
+        'requesterId': requesterId,
+        'listingId': listingId,
+        'offerId': offerId,
+        'updatedAt': FieldValue.serverTimestamp(),
+        'createdAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (_) {
+      // Contact unlock write is best-effort here so offer acceptance still
+      // succeeds even if this write is blocked by stale rules.
+    }
+  }
+
+  String _deriveRequesterIdFromOfferId({
+    required String listingId,
+    required String offerId,
+  }) {
+    final prefix = '${listingId}_';
+    if (!offerId.startsWith(prefix) || offerId.length <= prefix.length) {
+      return '';
+    }
+    return offerId.substring(prefix.length);
   }
 }
 

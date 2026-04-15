@@ -255,6 +255,8 @@ class PushNotificationService {
         );
       case 'offer_accepted':
       case 'offer_declined':
+      case 'return_due_soon_lender':
+      case 'return_due_soon_borrower':
         return PushOpenIntent(
           destination: PushOpenDestination.offers,
           type: type,
@@ -264,6 +266,13 @@ class PushNotificationService {
       case 'urgent_borrow_posted':
         return PushOpenIntent(
           destination: PushOpenDestination.home,
+          type: type,
+          listingId: listingId.isEmpty ? null : listingId,
+          offerId: offerId.isEmpty ? null : offerId,
+        );
+      case 'urgent_no_response':
+        return PushOpenIntent(
+          destination: PushOpenDestination.listings,
           type: type,
           listingId: listingId.isEmpty ? null : listingId,
           offerId: offerId.isEmpty ? null : offerId,

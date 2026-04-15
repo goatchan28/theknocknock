@@ -17,9 +17,13 @@ class Listing {
     required this.status,
     required this.createdAt,
     required this.imageUrl,
+    required this.urgent,
     required this.acceptedOfferId,
     required this.acceptedRequesterId,
     required this.archivedFromSold,
+    required this.returnedFromMatch,
+    this.pickedUpAt,
+    this.returnDueAt,
     this.urgentUntil,
   });
 
@@ -34,10 +38,14 @@ class Listing {
   final ListingStatus status;
   final DateTime? createdAt;
   final DateTime? urgentUntil;
+  final bool urgent;
   final String? imageUrl;
   final String? acceptedOfferId;
   final String? acceptedRequesterId;
   final bool archivedFromSold;
+  final bool returnedFromMatch;
+  final DateTime? pickedUpAt;
+  final DateTime? returnDueAt;
 
   bool get isBorrow => type == ListingType.borrow;
   bool get isLend => type == ListingType.lend;
@@ -46,11 +54,21 @@ class Listing {
   bool get hasAcceptedMatch =>
       acceptedOfferId != null && acceptedOfferId!.trim().isNotEmpty;
 
-  bool get isUrgent {
+  bool get hasUrgentTimer {
     if (!isBorrow || urgentUntil == null) {
       return false;
     }
     return urgentUntil!.isAfter(DateTime.now());
+  }
+
+  bool get isUrgent {
+    if (!isBorrow) {
+      return false;
+    }
+    if (urgent) {
+      return true;
+    }
+    return hasUrgentTimer;
   }
 
   static ListingType _typeFromString(String raw) {
@@ -99,10 +117,21 @@ class Listing {
       status: _statusFromString((data['status'] as String?) ?? 'active'),
       createdAt: _timestampToDateTime(data['createdAt']),
       urgentUntil: _timestampToDateTime(data['urgentUntil']),
+      urgent:
+          data['urgent'] as bool? ??
+          (_typeFromString((data['type'] as String?) ?? 'lend') ==
+                  ListingType.borrow &&
+              _timestampToDateTime(data['urgentUntil']) != null),
       imageUrl: data['imageUrl'] as String?,
       acceptedOfferId: (data['acceptedOfferId'] as String?)?.trim(),
       acceptedRequesterId: (data['acceptedRequesterId'] as String?)?.trim(),
       archivedFromSold: data['archivedFromSold'] as bool? ?? false,
+      returnedFromMatch:
+          (data['returnedFromMatch'] as bool? ?? false) ||
+          ((data['status'] as String?) == 'archived' &&
+              data['returnedAt'] is Timestamp),
+      pickedUpAt: _timestampToDateTime(data['pickedUpAt']),
+      returnDueAt: _timestampToDateTime(data['returnDueAt']),
     );
   }
 }

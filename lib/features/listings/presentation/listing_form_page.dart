@@ -17,17 +17,23 @@ class ListingFormPage extends StatefulWidget {
     super.key,
     this.embedded = false,
     this.showEmbeddedHeader = true,
+    this.prefillListing,
+    this.closeOnDoneAfterPost = false,
   }) : listing = null;
 
   const ListingFormPage.edit({
     super.key,
     required this.listing,
   })  : embedded = false,
-        showEmbeddedHeader = false;
+        showEmbeddedHeader = false,
+        prefillListing = null,
+        closeOnDoneAfterPost = false;
 
   final Listing? listing;
   final bool embedded;
   final bool showEmbeddedHeader;
+  final Listing? prefillListing;
+  final bool closeOnDoneAfterPost;
 
   bool get isEdit => listing != null;
 
@@ -64,12 +70,13 @@ class _ListingFormPageState extends State<ListingFormPage> {
   bool _isUrgent = false;
   Duration _urgentDuration = const Duration(hours: 1);
   XFile? _newImage;
+  String? _existingImageUrl;
   bool _saving = false;
 
   @override
   void initState() {
     super.initState();
-    final listing = widget.listing;
+    final listing = widget.listing ?? widget.prefillListing;
     if (listing == null) {
       return;
     }
@@ -82,9 +89,14 @@ class _ListingFormPageState extends State<ListingFormPage> {
     }
 
     _type = listing.type;
-    if (listing.isUrgent && listing.urgentUntil != null) {
+    _existingImageUrl = listing.imageUrl;
+    if (listing.isUrgent) {
       _isUrgent = true;
-      _urgentDuration = _closestDurationTo(listing.urgentUntil!.difference(DateTime.now()));
+      if (listing.urgentUntil != null) {
+        _urgentDuration = _closestDurationTo(
+          listing.urgentUntil!.difference(DateTime.now()),
+        );
+      }
     }
   }
 
@@ -212,6 +224,7 @@ class _ListingFormPageState extends State<ListingFormPage> {
         description: _descriptionController.text.trim(),
         category: _category,
         type: _type,
+        existingImageUrl: _existingImageUrl,
         urgentDuration: _type == ListingType.borrow &&
                 _isUrgent &&
                 urgentAlertsEnabled
@@ -257,6 +270,11 @@ class _ListingFormPageState extends State<ListingFormPage> {
         return;
       }
 
+      if (widget.closeOnDoneAfterPost) {
+        Navigator.of(context).pop(true);
+        return;
+      }
+
       _resetForm();
     } catch (error) {
       if (!mounted) {
@@ -278,6 +296,7 @@ class _ListingFormPageState extends State<ListingFormPage> {
 
     setState(() {
       _newImage = null;
+      _existingImageUrl = null;
       _category = _categories.first;
       _type = ListingType.lend;
       _isUrgent = false;
@@ -294,6 +313,7 @@ class _ListingFormPageState extends State<ListingFormPage> {
   @override
   Widget build(BuildContext context) {
     final listing = widget.listing;
+    final prefill = widget.prefillListing;
     final urgentAlertsEnabled =
         context.watch<AuthController>().profile?.urgentAlertsEnabled ?? false;
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
@@ -312,7 +332,7 @@ class _ListingFormPageState extends State<ListingFormPage> {
             const SizedBox(height: 16),
           ],
           _ListingPhotoPicker(
-            imageUrl: listing?.imageUrl,
+            imageUrl: _existingImageUrl ?? listing?.imageUrl ?? prefill?.imageUrl,
             selectedFile: _newImage,
             onPick: _saving ? null : _pickImage,
           ),
@@ -453,7 +473,11 @@ class _ListingFormPageState extends State<ListingFormPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.isEdit ? 'Edit Listing' : 'Create Listing'),
+        title: Text(
+          widget.isEdit
+              ? 'Edit Listing'
+              : (widget.prefillListing != null ? 'Relist Item' : 'Create Listing'),
+        ),
       ),
       body: content,
     );

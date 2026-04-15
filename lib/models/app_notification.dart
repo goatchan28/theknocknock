@@ -5,6 +5,9 @@ enum AppNotificationType {
   offerAccepted,
   offerDeclined,
   urgentBorrowPosted,
+  urgentNoResponse,
+  returnDueSoonLender,
+  returnDueSoonBorrower,
 }
 
 class AppNotification {
@@ -51,6 +54,12 @@ class AppNotification {
         return AppNotificationType.offerDeclined;
       case 'urgent_borrow_posted':
         return AppNotificationType.urgentBorrowPosted;
+      case 'urgent_no_response':
+        return AppNotificationType.urgentNoResponse;
+      case 'return_due_soon_lender':
+        return AppNotificationType.returnDueSoonLender;
+      case 'return_due_soon_borrower':
+        return AppNotificationType.returnDueSoonBorrower;
       default:
         return AppNotificationType.offerReceived;
     }

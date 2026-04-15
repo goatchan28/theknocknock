@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -44,15 +46,40 @@ class ListingDetailPage extends StatelessWidget {
   }
 }
 
-class _ListingBody extends StatelessWidget {
+class _ListingBody extends StatefulWidget {
   const _ListingBody({required this.listing});
 
   final Listing listing;
 
   @override
+  State<_ListingBody> createState() => _ListingBodyState();
+}
+
+class _ListingBodyState extends State<_ListingBody> {
+  Timer? _urgentTicker;
+
+  @override
+  void initState() {
+    super.initState();
+    _urgentTicker = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _urgentTicker?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthController>();
     final listingService = context.read<ListingService>();
+    final listing = widget.listing;
     final currentUserId = auth.firebaseUser?.uid;
     final typeTone = _typeTone(context, listing.type);
     final statusTone = _statusTone(context, listing.status);
@@ -85,7 +112,7 @@ class _ListingBody extends StatelessWidget {
               ),
             ),
             Chip(
-              label: Text(_statusLabel(listing.status)),
+              label: Text(_statusLabel(listing)),
               backgroundColor: statusTone.background,
               side: BorderSide(color: statusTone.border),
               labelStyle: TextStyle(
@@ -96,9 +123,7 @@ class _ListingBody extends StatelessWidget {
             Chip(label: Text(listing.category)),
             if (listing.isUrgent)
               Chip(
-                label: Text(
-                  'Urgent · ${_formatUrgentTimeLeft(listing.urgentUntil)} left',
-                ),
+                label: Text(_urgentLabel(listing)),
                 backgroundColor: urgentTone.background,
                 side: BorderSide(color: urgentTone.border),
                 labelStyle: TextStyle(
@@ -120,9 +145,9 @@ class _ListingBody extends StatelessWidget {
           _formatTimeAgo(listing.createdAt),
           style: Theme.of(context).textTheme.bodySmall,
         ),
-        if (listing.isBorrow && listing.isUrgent)
+        if (listing.isBorrow && listing.hasUrgentTimer && listing.urgentUntil != null)
           Text(
-            'Urgent request expires in ${_formatUrgentTimeLeft(listing.urgentUntil)}.',
+            'Urgent request expires in ${_formatUrgentTimeLeft(listing.urgentUntil!)}.',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: Theme.of(context).colorScheme.error,
                 ),
@@ -173,8 +198,8 @@ class _ListingBody extends StatelessWidget {
           onPressed: () => _showReportDialog(
             context,
             listingService: listingService,
-            listingId: listing.id,
             reporterId: currentUserId,
+            listing: listing,
           ),
           icon: const Icon(Icons.flag_outlined),
           label: const Text('Report listing'),
@@ -186,8 +211,8 @@ class _ListingBody extends StatelessWidget {
   Future<void> _showReportDialog(
     BuildContext context, {
     required ListingService listingService,
-    required String listingId,
     required String reporterId,
+    required Listing listing,
   }) async {
     final reasonController = TextEditingController();
 
@@ -226,9 +251,11 @@ class _ListingBody extends StatelessWidget {
         : reasonController.text.trim();
 
     await listingService.submitListingReport(
-      listingId: listingId,
+      listingId: listing.id,
       reporterId: reporterId,
       reason: reason,
+      reportedUserId: listing.ownerId,
+      listingTitle: listing.title,
     );
 
     if (!context.mounted) {
@@ -240,14 +267,17 @@ class _ListingBody extends StatelessWidget {
     messenger.showSnackBar(const SnackBar(content: Text('Report submitted.')));
   }
 
-  String _statusLabel(ListingStatus status) {
-    switch (status) {
+  String _statusLabel(Listing listing) {
+    if (listing.returnedFromMatch) {
+      return 'Returned';
+    }
+    switch (listing.status) {
       case ListingStatus.active:
         return 'Active';
       case ListingStatus.archived:
         return 'Archived';
       case ListingStatus.sold:
-        return 'In Use';
+        return listing.pickedUpAt == null ? 'Matched' : 'In Use';
     }
   }
 
@@ -305,7 +335,10 @@ class _OwnerActionSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (listing.isSold || !listing.isActive) {
-      return _UnavailableCard(status: listing.status);
+      return _UnavailableCard(
+        status: listing.status,
+        isPickedUp: listing.pickedUpAt != null,
+      );
     }
 
     return FilledButton.icon(
@@ -335,6 +368,20 @@ class _OffererActionSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isReturnedMatch = offer?.status == OfferStatus.accepted &&
+        listing.returnedFromMatch;
+
+    if (isReturnedMatch) {
+      return Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceVariant,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Text('This item was marked as returned.'),
+      );
+    }
+
     if (offer?.status == OfferStatus.accepted) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -351,7 +398,10 @@ class _OffererActionSection extends StatelessWidget {
     }
 
     if (listing.isSold || !listing.isActive) {
-      return _UnavailableCard(status: listing.status);
+      return _UnavailableCard(
+        status: listing.status,
+        isPickedUp: listing.pickedUpAt != null,
+      );
     }
 
     if (offer?.isPending == true) {
@@ -557,14 +607,20 @@ class _ContactContainer extends StatelessWidget {
 }
 
 class _UnavailableCard extends StatelessWidget {
-  const _UnavailableCard({required this.status});
+  const _UnavailableCard({
+    required this.status,
+    required this.isPickedUp,
+  });
 
   final ListingStatus status;
+  final bool isPickedUp;
 
   @override
   Widget build(BuildContext context) {
     final label = status == ListingStatus.sold
-        ? 'This listing is currently in use.'
+        ? (isPickedUp
+            ? 'This listing is currently in use.'
+            : 'This listing is currently matched.')
         : 'This listing is currently unavailable.';
 
     return Container(
@@ -639,14 +695,10 @@ String _formatTimeAgo(DateTime? dateTime) {
   return 'Posted ${weeks}w ago';
 }
 
-String _formatUrgentTimeLeft(DateTime? urgentUntil) {
-  if (urgentUntil == null) {
-    return 'soon';
-  }
-
+String _formatUrgentTimeLeft(DateTime urgentUntil) {
   final diff = urgentUntil.difference(DateTime.now());
   if (diff <= Duration.zero) {
-    return 'ending';
+    return '<1m';
   }
   if (diff.inMinutes < 1) {
     return '<1m';
@@ -658,6 +710,13 @@ String _formatUrgentTimeLeft(DateTime? urgentUntil) {
     return '${diff.inHours}h';
   }
   return '${diff.inDays}d';
+}
+
+String _urgentLabel(Listing listing) {
+  if (listing.hasUrgentTimer && listing.urgentUntil != null) {
+    return 'Urgent · ${_formatUrgentTimeLeft(listing.urgentUntil!)} left';
+  }
+  return 'Urgent';
 }
 
 class _ChipTone {

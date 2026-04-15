@@ -1,17 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../../../core/input_formatters/us_phone_input_formatter.dart';
-import '../../../models/app_user.dart';
 import '../../../models/listing.dart';
 import '../../../models/listing_offer.dart';
+import '../../../models/public_profile.dart';
 import '../../../providers/auth_controller.dart';
 import '../../../services/listing_service.dart';
-import '../../../services/user_service.dart';
+import '../../../services/public_profile_service.dart';
 import '../../listings/presentation/listing_detail_page.dart';
 
 class MyOffersPage extends StatefulWidget {
-  const MyOffersPage({super.key});
+  const MyOffersPage({
+    super.key,
+    this.listingTypeFilter,
+  });
+
+  final ListingType? listingTypeFilter;
 
   @override
   State<MyOffersPage> createState() => _MyOffersPageState();
@@ -22,10 +26,8 @@ class _MyOffersPageState extends State<MyOffersPage> {
   final _searchFocusNode = FocusNode();
   Stream<List<ListingOffer>>? _myOffersStream;
   String? _streamRequesterId;
-  final Set<OfferStatus> _selectedStatuses = {
-    OfferStatus.pending,
-    OfferStatus.accepted,
-    OfferStatus.declined,
+  final Set<_OfferFilterStatus> _selectedStatuses = {
+    ..._OfferFilterStatus.values,
   };
 
   String _search = '';
@@ -113,7 +115,8 @@ class _MyOffersPageState extends State<MyOffersPage> {
 
         final offers = snapshot.data ?? const <ListingOffer>[];
         final visibleOffers = offers
-            .where((offer) => _selectedStatuses.contains(offer.status))
+            .where(_matchesListingTypeFilter)
+            .where((offer) => _selectedStatuses.contains(_filterStatusForOffer(offer)))
             .where(_matchesSearch)
             .toList();
 
@@ -129,12 +132,17 @@ class _MyOffersPageState extends State<MyOffersPage> {
     required List<ListingOffer> allOffers,
     required List<ListingOffer> visibleOffers,
   }) {
+    final showStatusChip =
+        _selectedStatuses.length != _OfferFilterStatus.values.length;
+
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         _buildSearchAndFilterBar(),
-        const SizedBox(height: 10),
-        _buildActiveFilterChip(),
+        if (showStatusChip) ...[
+          const SizedBox(height: 10),
+          _buildActiveFilterChip(),
+        ],
         const SizedBox(height: 16),
         if (allOffers.isEmpty)
           const _EmptyState(
@@ -158,7 +166,19 @@ class _MyOffersPageState extends State<MyOffersPage> {
       return true;
     }
     final title = offer.listingTitle.trim().toLowerCase();
-    return title.contains(normalized);
+    if (title.startsWith(normalized)) {
+      return true;
+    }
+    final words = title.split(RegExp(r'\s+'));
+    return words.any((word) => word.startsWith(normalized));
+  }
+
+  bool _matchesListingTypeFilter(ListingOffer offer) {
+    final filter = widget.listingTypeFilter;
+    if (filter == null) {
+      return true;
+    }
+    return offer.listingType == filter;
   }
 
   Widget _buildSearchAndFilterBar() {
@@ -180,6 +200,7 @@ class _MyOffersPageState extends State<MyOffersPage> {
             ),
             onChanged: _applySearchLive,
             onSubmitted: _applySearch,
+            onTapOutside: (_) => _searchFocusNode.unfocus(),
           ),
         ),
         const SizedBox(width: 10),
@@ -193,24 +214,21 @@ class _MyOffersPageState extends State<MyOffersPage> {
   }
 
   Widget _buildActiveFilterChip() {
-    final label = switch (_selectedStatuses.length) {
-      3 => 'Status: All',
-      _ => 'Status: ${_selectedStatuses.map(_statusLabel).join(', ')}',
-    };
+    final label = 'Status: ${_selectedStatuses.map(_statusLabel).join(', ')}';
 
     return Chip(label: Text(label));
   }
 
   Future<void> _openStatusFilterSheet() async {
-    final result = await showModalBottomSheet<Set<OfferStatus>>(
+    final result = await showModalBottomSheet<Set<_OfferFilterStatus>>(
       context: context,
       showDragHandle: true,
       builder: (context) {
-        final tempStatuses = <OfferStatus>{..._selectedStatuses};
+        final tempStatuses = <_OfferFilterStatus>{..._selectedStatuses};
 
         return StatefulBuilder(
           builder: (context, setSheetState) {
-            void toggleStatus(OfferStatus status, bool selected) {
+            void toggleStatus(_OfferFilterStatus status, bool selected) {
               setSheetState(() {
                 if (selected) {
                   tempStatuses.add(status);
@@ -232,7 +250,7 @@ class _MyOffersPageState extends State<MyOffersPage> {
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 12),
-                    ...OfferStatus.values.map(
+                    ..._OfferFilterStatus.values.map(
                       (status) => CheckboxListTile(
                         value: tempStatuses.contains(status),
                         onChanged: (value) => toggleStatus(status, value ?? false),
@@ -246,9 +264,9 @@ class _MyOffersPageState extends State<MyOffersPage> {
                         Expanded(
                           child: OutlinedButton(
                             onPressed: () {
-                              Navigator.of(context).pop(OfferStatus.values.toSet());
+                              Navigator.of(context).pop(_OfferFilterStatus.values.toSet());
                             },
-                            child: const Text('Clear'),
+                            child: const Text('Reset'),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -280,17 +298,46 @@ class _MyOffersPageState extends State<MyOffersPage> {
     });
   }
 
-  String _statusLabel(OfferStatus status) {
-    switch (status) {
+  _OfferFilterStatus _filterStatusForOffer(ListingOffer offer) {
+    switch (offer.status) {
       case OfferStatus.pending:
-        return 'Pending';
-      case OfferStatus.accepted:
-        return 'Accepted';
+        return _OfferFilterStatus.pending;
       case OfferStatus.declined:
-        return 'Declined';
+        return _OfferFilterStatus.declined;
+      case OfferStatus.accepted:
+        if (offer.returnedAt != null) {
+          return _OfferFilterStatus.returned;
+        }
+        if (offer.pickedUpAt != null) {
+          return _OfferFilterStatus.inUse;
+        }
+        return _OfferFilterStatus.matched;
     }
   }
 
+  String _statusLabel(_OfferFilterStatus status) {
+    switch (status) {
+      case _OfferFilterStatus.pending:
+        return 'Pending';
+      case _OfferFilterStatus.matched:
+        return 'Matched';
+      case _OfferFilterStatus.inUse:
+        return 'In Use';
+      case _OfferFilterStatus.declined:
+        return 'Declined';
+      case _OfferFilterStatus.returned:
+        return 'Returned';
+    }
+  }
+
+}
+
+enum _OfferFilterStatus {
+  pending,
+  matched,
+  inUse,
+  declined,
+  returned,
 }
 
 class _OfferRow extends StatefulWidget {
@@ -307,6 +354,7 @@ class _OfferRow extends StatefulWidget {
 class _OfferRowState extends State<_OfferRow> {
   Stream<Listing?>? _listingStream;
   String? _listingId;
+  bool _busy = false;
 
   @override
   void didChangeDependencies() {
@@ -342,6 +390,20 @@ class _OfferRowState extends State<_OfferRow> {
             : (widget.offer.listingTitle.trim().isNotEmpty
                 ? widget.offer.listingTitle.trim()
                 : 'Listing unavailable');
+        final isReturned = widget.offer.status == OfferStatus.accepted &&
+            listing?.returnedFromMatch == true;
+        final isInUse = widget.offer.pickedUpAt != null && !isReturned;
+        final currentUserId = context.read<AuthController>().firebaseUser?.uid;
+        final listingType = listing?.type ?? widget.offer.listingType;
+        final borrowerId =
+            listingType == ListingType.borrow ? widget.offer.ownerId : widget.offer.requesterId;
+        final isCurrentUserBorrower =
+            currentUserId != null && currentUserId == borrowerId;
+        final isLenderManagingBorrowFlow =
+            widget.offer.status == OfferStatus.accepted &&
+            listing?.type == ListingType.borrow &&
+            widget.offer.returnedAt == null;
+        final hasPickedUp = widget.offer.pickedUpAt != null;
 
         return Padding(
           padding: const EdgeInsets.only(bottom: 10),
@@ -366,31 +428,100 @@ class _OfferRowState extends State<_OfferRow> {
                 children: [
                   Row(
                     children: [
-                      Expanded(
-                        child: Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleMedium,
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: SizedBox(
+                          width: 70,
+                          height: 70,
+                          child: _OfferThumb(imageUrl: listing?.imageUrl),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      _StatusChip(status: widget.offer.status),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              listing?.category ?? 'Unknown category',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                            const SizedBox(height: 6),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
+                              children: [
+                                _StatusChip(
+                                  status: widget.offer.status,
+                                  isReturned: isReturned,
+                                  isInUse: isInUse,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            _CounterpartyName(userId: widget.offer.ownerId),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      const Icon(Icons.chevron_right),
                     ],
                   ),
+                  if (isInUse &&
+                      widget.offer.pickedUpAt != null &&
+                      !(isLenderManagingBorrowFlow && hasPickedUp)) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _inUseSummaryText(
+                        pickedUpAt: widget.offer.pickedUpAt!,
+                        returnDueAt: widget.offer.returnDueAt,
+                        isBorrowerView: isCurrentUserBorrower,
+                      ),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
                   const SizedBox(height: 6),
-                  Text(
-                    listing?.category ?? 'Unknown category',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    _timeText(widget.offer.createdAt),
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                  if (widget.offer.status == OfferStatus.accepted) ...[
+                  if (widget.offer.status == OfferStatus.pending) ...[
                     const SizedBox(height: 10),
-                    _AcceptedContactCard(userId: widget.offer.ownerId),
+                    OutlinedButton.icon(
+                      onPressed: _busy ? null : _cancelPendingRequest,
+                      icon: const Icon(Icons.close),
+                      label: const Text('Cancel request'),
+                    ),
+                  ] else if (isLenderManagingBorrowFlow && !hasPickedUp) ...[
+                    const SizedBox(height: 10),
+                    FilledButton.tonalIcon(
+                      onPressed: _busy || listing == null
+                          ? null
+                          : () => _markAsPickedUp(listing),
+                      icon: const Icon(Icons.inventory_2_outlined),
+                      label: const Text('Mark as picked up'),
+                    ),
+                  ] else if (isLenderManagingBorrowFlow && hasPickedUp) ...[
+                    const SizedBox(height: 10),
+                    _BorrowDurationInfo(
+                      pickedUpAt: widget.offer.pickedUpAt!,
+                      returnDueAt: widget.offer.returnDueAt,
+                    ),
+                    const SizedBox(height: 10),
+                    FilledButton.icon(
+                      onPressed:
+                          _busy ? null : () => _markAsReturned(widget.offer.id),
+                      icon: const Icon(Icons.assignment_return_outlined),
+                      label: const Text('Mark returned'),
+                    ),
+                  ] else if (isReturned) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      'Item marked returned by lender.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                   ],
                 ],
               ),
@@ -401,118 +532,266 @@ class _OfferRowState extends State<_OfferRow> {
     );
   }
 
-  String _timeText(DateTime? dateTime) {
-    if (dateTime == null) {
-      return 'Sent recently';
+  Future<void> _cancelPendingRequest() async {
+    final requesterId = context.read<AuthController>().firebaseUser?.uid;
+    if (requesterId == null) {
+      _showMessage('Session expired. Please sign in again.');
+      return;
     }
 
-    final diff = DateTime.now().difference(dateTime);
-    if (diff.inMinutes < 1) {
-      return 'Sent just now';
-    }
-    if (diff.inHours < 1) {
-      return 'Sent ${diff.inMinutes}m ago';
-    }
-    if (diff.inDays < 1) {
-      return 'Sent ${diff.inHours}h ago';
-    }
-    if (diff.inDays < 7) {
-      return 'Sent ${diff.inDays}d ago';
-    }
-    final weeks = (diff.inDays / 7).floor();
-    return 'Sent ${weeks}w ago';
-  }
-}
-
-class _AcceptedContactCard extends StatelessWidget {
-  const _AcceptedContactCard({required this.userId});
-
-  final String userId;
-
-  @override
-  Widget build(BuildContext context) {
-    final userService = context.read<UserService>();
-    return StreamBuilder<AppUser?>(
-      stream: userService.watchUser(userId),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const _ContactContainer(
-            title: 'Matched contact',
-            subtitle: 'Loading contact...',
-          );
-        }
-        if (snapshot.hasError) {
-          return const _ContactContainer(
-            title: 'Matched contact',
-            subtitle: 'Contact unlock pending.',
-          );
-        }
-
-        final user = snapshot.data;
-        final name = (user?.displayName ?? '').trim().isNotEmpty
-            ? user!.displayName!.trim()
-            : 'Columbia Student';
-        final phone = UsPhoneInputFormatter.formatForDisplay(
-          (user?.phoneNumber ?? '').trim(),
-        );
-
-        return _ContactContainer(
-          title: 'Matched contact',
-          subtitle: '$name\n${phone.isEmpty ? 'Phone unavailable' : phone}',
-        );
-      },
-    );
-  }
-}
-
-class _ContactContainer extends StatelessWidget {
-  const _ContactContainer({
-    required this.title,
-    required this.subtitle,
-  });
-
-  final String title;
-  final String subtitle;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.35),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Padding(
-            padding: EdgeInsets.only(top: 2),
-            child: Icon(Icons.contact_phone_outlined, size: 18),
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cancel this request?'),
+        content: const Text(
+          'This removes your pending request from both sides.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Keep'),
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: Theme.of(context).textTheme.labelLarge),
-                const SizedBox(height: 2),
-                Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
-              ],
-            ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Cancel request'),
           ),
         ],
       ),
     );
+
+    if (confirmed != true || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _busy = true;
+    });
+    try {
+      await context.read<ListingService>().cancelPendingOffer(
+            offerId: widget.offer.id,
+            requesterId: requesterId,
+          );
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Request cancelled.');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Could not cancel request: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _markAsPickedUp(Listing listing) async {
+    final requesterId = context.read<AuthController>().firebaseUser?.uid;
+    if (requesterId == null) {
+      _showMessage('Session expired. Please sign in again.');
+      return;
+    }
+
+    final selectedDate = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now().add(const Duration(days: 7)),
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+      helpText: 'When should ${listing.ownerDisplayName.split(' ').first} return it?',
+    );
+
+    if (selectedDate == null || !mounted) {
+      return;
+    }
+
+    final dueAt = DateTime(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day,
+      23,
+      59,
+    );
+
+    setState(() {
+      _busy = true;
+    });
+    try {
+      await context.read<ListingService>().markOfferPickedUp(
+            offerId: widget.offer.id,
+            actorId: requesterId,
+            returnDueAt: dueAt,
+          );
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Marked as picked up.');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Could not mark picked up: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _markAsReturned(String offerId) async {
+    final requesterId = context.read<AuthController>().firebaseUser?.uid;
+    if (requesterId == null) {
+      _showMessage('Session expired. Please sign in again.');
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Mark item as returned?'),
+        content: const Text(
+          'This closes the active borrow match. You can no longer manage this item from offers.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Mark returned'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _busy = true;
+    });
+    try {
+      await context.read<ListingService>().markOfferReturned(
+            offerId: offerId,
+            actorId: requesterId,
+          );
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Marked as returned.');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Could not mark returned: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
+    }
+  }
+
+  void _showMessage(String message) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String _inUseSummaryText({
+    required DateTime pickedUpAt,
+    required DateTime? returnDueAt,
+    required bool isBorrowerView,
+  }) {
+    final now = DateTime.now();
+    final daysHeld = now.difference(pickedUpAt).inDays;
+    final displayHeldDays = daysHeld < 0 ? 1 : daysHeld + 1;
+    final dueText = returnDueAt == null ? 'No return date set' : _formatDate(returnDueAt);
+    if (isBorrowerView) {
+      if (returnDueAt == null) {
+        return 'Return date not set yet.';
+      }
+      final dayDelta = _calendarDayDelta(now, returnDueAt);
+      if (dayDelta > 0) {
+        return '$dayDelta day${dayDelta == 1 ? '' : 's'} left to return. Return by $dueText.';
+      }
+
+      final remaining = returnDueAt.difference(now);
+      if (remaining.isNegative) {
+        final overdueDays = _calendarDayDelta(returnDueAt, now);
+        if (overdueDays <= 0) {
+          return 'Overdue. Return date was $dueText.';
+        }
+        return 'Overdue by $overdueDays day${overdueDays == 1 ? '' : 's'}. Return date was $dueText.';
+      }
+      return '${_formatHoursMinutes(remaining)} left to return. Return by $dueText.';
+    }
+    return 'Lent for $displayHeldDays day${displayHeldDays == 1 ? '' : 's'}. ${returnDueAt == null ? dueText : 'Due $dueText'}.';
+  }
+
+  int _calendarDayDelta(DateTime from, DateTime to) {
+    final fromDay = DateTime(from.year, from.month, from.day);
+    final toDay = DateTime(to.year, to.month, to.day);
+    return toDay.difference(fromDay).inDays;
+  }
+
+  String _formatHoursMinutes(Duration remaining) {
+    final minutesTotal = remaining.inMinutes <= 0 ? 1 : remaining.inMinutes;
+    final hours = minutesTotal ~/ 60;
+    final minutes = minutesTotal % 60;
+    if (hours <= 0) {
+      return '${minutes == 0 ? 1 : minutes}m';
+    }
+    return '${hours}h ${minutes}m';
+  }
+
+  String _formatDate(DateTime date) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return '${months[date.month - 1]} ${date.day}, ${date.year}';
   }
 }
 
 class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.status});
+  const _StatusChip({
+    required this.status,
+    this.isReturned = false,
+    this.isInUse = false,
+  });
 
   final OfferStatus status;
+  final bool isReturned;
+  final bool isInUse;
 
   @override
   Widget build(BuildContext context) {
+    if (isReturned) {
+      return Chip(
+        backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+        label: const Text('Returned'),
+      );
+    }
+
     Color? color;
     switch (status) {
       case OfferStatus.pending:
@@ -531,11 +810,135 @@ class _StatusChip extends StatelessWidget {
       label: Text(
         switch (status) {
           OfferStatus.pending => 'Pending',
-          OfferStatus.accepted => 'Accepted',
+          OfferStatus.accepted => isInUse ? 'In Use' : 'Matched',
           OfferStatus.declined => 'Declined',
         },
       ),
     );
+  }
+}
+
+class _BorrowDurationInfo extends StatelessWidget {
+  const _BorrowDurationInfo({
+    required this.pickedUpAt,
+    required this.returnDueAt,
+  });
+
+  final DateTime pickedUpAt;
+  final DateTime? returnDueAt;
+
+  @override
+  Widget build(BuildContext context) {
+    final daysHeld = DateTime.now().difference(pickedUpAt).inDays;
+    final displayHeldDays = daysHeld < 0 ? 1 : daysHeld + 1;
+    final dueText = returnDueAt == null
+        ? 'No due date set'
+        : 'Due ${_formatDate(returnDueAt!)}';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.35),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        'Borrower has had this item for $displayHeldDays day${displayHeldDays == 1 ? '' : 's'}.\n$dueText',
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
+    );
+  }
+
+  static String _formatDate(DateTime date) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return '${months[date.month - 1]} ${date.day}, ${date.year}';
+  }
+}
+
+class _ChipTone {
+  const _ChipTone({
+    required this.background,
+    required this.foreground,
+  });
+
+  final Color background;
+  final Color foreground;
+
+  Color get border => foreground.withOpacity(0.28);
+}
+
+class _OfferThumb extends StatelessWidget {
+  const _OfferThumb({required this.imageUrl});
+
+  final String? imageUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    if (imageUrl == null || imageUrl!.trim().isEmpty) {
+      return Container(
+        color: Theme.of(context).colorScheme.surfaceVariant,
+        alignment: Alignment.center,
+        child: const Icon(Icons.image_not_supported_outlined),
+      );
+    }
+
+    return Image.network(
+      imageUrl!,
+      fit: BoxFit.cover,
+      errorBuilder: (_, __, ___) {
+        return Container(
+          color: Theme.of(context).colorScheme.surfaceVariant,
+          alignment: Alignment.center,
+          child: const Icon(Icons.broken_image_outlined),
+        );
+      },
+    );
+  }
+}
+
+class _CounterpartyName extends StatelessWidget {
+  const _CounterpartyName({required this.userId});
+
+  final String userId;
+
+  @override
+  Widget build(BuildContext context) {
+    final profileService = context.read<PublicProfileService>();
+    return StreamBuilder<PublicProfile?>(
+      stream: profileService.watchPublicProfile(userId),
+      builder: (context, snapshot) {
+        final profile = snapshot.data;
+        final displayName = (profile?.displayName ?? '').trim().isNotEmpty
+            ? profile!.displayName.trim()
+            : _shortUser(userId);
+        return Text(
+          'With $displayName',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.bodySmall,
+        );
+      },
+    );
+  }
+
+  String _shortUser(String uid) {
+    if (uid.length <= 8) {
+      return uid;
+    }
+    return '${uid.substring(0, 8)}...';
   }
 }
 
